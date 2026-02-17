@@ -237,3 +237,16 @@ Temporary Items
 
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks,visualstudiocode
+
+# Data, checkpoints, and other artifacts
+data/
+checkpoints/
+models/         # If they save raw models here
+*.pt
+*.pth
+*.ckpt
+
+# Local Configuration & Secrets
+.env
+Weights & Biases
+wandb/

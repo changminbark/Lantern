@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my_engine"  # <-- this is your importable package name. It needs to match the name of the folder you created under src/.
+version = "0.1.0"
+description = "Student project for CSCI 357 Coursework"
+dependencies = [
+    "jupyter", "jupyterlab", "jupytext", "nbconvert", "ipython>=8.18.0", "ipykernel",
+    "numpy", "pandas", "matplotlib",
+    "scikit-learn", "statsmodels",
+    "torch", "torchvision", "torchaudio", "torchmetrics",
+    "fastapi", "uvicorn", "gradio", "streamlit",
+    "wandb", "tqdm",
+    "kaggle", "kagglehub", "ucimlrepo"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
