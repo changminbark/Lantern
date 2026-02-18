@@ -14,7 +14,7 @@ Date: 2/16/2026
 
 import os
 from pathlib import Path
-from typing import Iterable, Union
+from typing import Iterable, Optional, Union
 import torch
 import torch.nn as nn
 from my_engine.config import ModelConfig, ModelType, TrainerConfig
@@ -121,3 +121,41 @@ def load_model_from_checkpoint(
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     return model
+
+def make_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    config: TrainerConfig
+) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
+    """
+    Factory for learning rate schedulers.
+    
+    Args:
+        optimizer: The optimizer to schedule
+        config: Configuration containing scheduler settings
+        
+    Returns:
+        Scheduler instance, or None if use_scheduler is False
+        
+    Raises:
+        ValueError: If scheduler_type is unrecognized
+    """
+    if not config.use_scheduler:
+        return None
+    
+    if config.scheduler_type == "step":
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=config.scheduler_step_size,
+            gamma=config.scheduler_gamma
+        )
+    elif config.scheduler_type == "reduce_on_plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=config.scheduler_gamma,
+            patience=config.scheduler_patience,
+            min_lr=config.scheduler_min_lr
+        )
+    # Add more schedulers as needed...
+    else:
+        raise ValueError(f"Unknown scheduler type: {config.scheduler_type}")

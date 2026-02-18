@@ -250,3 +250,5 @@ models/         # If they save raw models here
 .env
 Weights & Biases
 wandb/
+bucknell-university-csci357-2026sp/
+cb073-bucknell-university/
