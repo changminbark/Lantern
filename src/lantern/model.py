@@ -1,9 +1,11 @@
-
 from dataclasses import asdict
 from typing import Any, Dict
+
 import torch
 import torch.nn as nn
+
 from lantern.config import ModelConfig
+
 
 class MLP_Model(nn.Module):
     """A configurable multi-layer perceptron with ReLU activations and optional dropout."""
@@ -56,13 +58,13 @@ class MLP_Model(nn.Module):
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return total, trainable
-    
+
     def get_architecture_config(self) -> Dict[str, Any]:
         return {
             "model_type": self.config.model_type,
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
-            "config": asdict(self.config)
+            "config": asdict(self.config),
         }
 
     def __str__(self) -> str:

@@ -30,6 +30,7 @@ line-length = 88
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]   # pycodestyle errors, pyflakes, isort
+ignore = ["E501"]           # line-too-long: not auto-fixable in comments/docstrings
 
 [tool.ruff.lint.isort]
 known-first-party = ["lantern"]

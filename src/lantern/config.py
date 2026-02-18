@@ -1,4 +1,3 @@
-
 """
 config.py
 
@@ -12,8 +11,10 @@ Date: 2/16/2026
 
 from dataclasses import dataclass, field
 from enum import Enum
-import torch
 from typing import List, Optional
+
+import torch
+
 
 @dataclass
 class TrainerConfig:
@@ -35,40 +36,46 @@ class TrainerConfig:
         checkpoint_save_interval: Save a checkpoint every N epochs.
         checkpoint_best_filename: Filename for the best model checkpoint.
     """
+
     trainer_batch_size: int = 64
     evaluator_batch_size: int = 256
     learning_rate: float = 0.001
     device: torch.device = torch.device("cpu")
     num_epochs: int = 10
     weight_decay: float = 0.0
-    early_stopping_patience: Optional[int] = 5          # Set to None to disable early stopping
+    early_stopping_patience: Optional[int] = 5  # Set to None to disable early stopping
     early_stopping_min_delta: float = 0.001
     optimizer_name: str = "adam"
     momentum: float = 0.9
-    
+
     # Checkpointing Settings
-    checkpoint_dir: str = "./checkpoints"               # Directory where checkpoints will be saved
-    checkpoint_last_filename: str = "last.pt"           # Filename for most recent checkpoint
-    checkpoint_save_interval: int = 5                   # Save checkpoint every N epochs
-    checkpoint_best_filename: str = "best.pt"           # Filename for the best model checkpoint
-    
+    checkpoint_dir: str = "./checkpoints"  # Directory where checkpoints will be saved
+    checkpoint_last_filename: str = "last.pt"  # Filename for most recent checkpoint
+    checkpoint_save_interval: int = 5  # Save checkpoint every N epochs
+    checkpoint_best_filename: str = "best.pt"  # Filename for the best model checkpoint
+
     # Learning Rate Scheduler Settings
-    use_scheduler: bool = False                                # Enable/disable scheduling
-    scheduler_type: str = "reduce_on_plateau"                  # Options: "step", "exponential", "cosine", "reduce_on_plateau"
-    scheduler_step_size: int = 10                              # For StepLR: epochs between LR drops
-    scheduler_gamma: float = 0.1                               # Factor to reduce LR
-    scheduler_patience: int = 3                                # For ReduceLROnPlateau: epochs to wait before reducing
-    scheduler_min_lr: float = 1e-6                             # Minimum learning rate (prevents it from going too low)
-    
+    use_scheduler: bool = False  # Enable/disable scheduling
+    scheduler_type: str = "reduce_on_plateau"  # Options: "step", "exponential", "cosine", "reduce_on_plateau"
+    scheduler_step_size: int = 10  # For StepLR: epochs between LR drops
+    scheduler_gamma: float = 0.1  # Factor to reduce LR
+    scheduler_patience: int = 3  # For ReduceLROnPlateau: epochs to wait before reducing
+    scheduler_min_lr: float = (
+        1e-6  # Minimum learning rate (prevents it from going too low)
+    )
+
     # Metrics Settings
-    num_classes: int = 10                                        # Number of classes for classification metrics (e.g. F1)
+    num_classes: int = 10  # Number of classes for classification metrics (e.g. F1)
+
 
 class ModelType(Enum):
     """Supported model architecture types."""
+
     MLP = "mlp"
-    
+
     def __str__(self) -> str:
         return self.value
+
 
 @dataclass
 class ModelConfig:
@@ -79,6 +86,7 @@ class ModelConfig:
         hidden_units: Number of neurons in each hidden layer.
         dropout: Dropout rate after each hidden layer (aligned with hidden_units).
     """
+
     model_type: ModelType = ModelType.MLP
     hidden_units: List[int] = field(default_factory=lambda: [128, 64])
     dropout: List[float] = field(default_factory=lambda: [0.1, 0.2])
@@ -90,4 +98,6 @@ class ModelConfig:
                 self.model_type = ModelType(self.model_type)
             except ValueError:
                 valid = [e.value for e in ModelType]
-                raise ValueError(f"Unknown model_type '{self.model_type}'. Must be one of {valid}")
+                raise ValueError(
+                    f"Unknown model_type '{self.model_type}'. Must be one of {valid}"
+                )
