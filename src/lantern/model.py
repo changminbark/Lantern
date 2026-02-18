@@ -3,7 +3,7 @@ from dataclasses import asdict
 from typing import Any, Dict
 import torch
 import torch.nn as nn
-from my_engine.config import ModelConfig
+from lantern.config import ModelConfig
 
 class MLP_Model(nn.Module):
     """A configurable multi-layer perceptron with ReLU activations and optional dropout."""

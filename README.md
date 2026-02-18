@@ -1,4 +1,8 @@
-# AI and Neural Networks Practice Repository
+# Lantern
+
+A custom PyTorch neural network engine and course notebooks for CSCI 357 - AI and Neural Networks.
+
+## Class Information
 
 Name(s): Chang Min<br>
 Course: CSCI 357 - AI and Neural Networks<br>
@@ -7,7 +11,11 @@ Semester: Spring 2026<br>
 Instructor: Prof. King<br>
 
 ## Description
-AI and Neural Networks repo that contains code for labs/hw
+This repo has two main components:
+
+- **`src/lantern`** — A custom PyTorch neural network engine that provides reusable building blocks for training and evaluating models. Includes support for configurable model architectures (MLP), training loops, optimizers, learning rate schedulers, checkpointing, early stopping, metrics, and W&B sweep utilities.
+
+- **`notebooks/`** — Jupyter notebooks containing class notes, labs, and homework assignments for CSCI 357.
 
 ## Installation
 Using VSCode with Google Colab extension (no Python environment/package management required)

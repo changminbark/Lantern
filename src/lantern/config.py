@@ -45,11 +45,13 @@ class TrainerConfig:
     early_stopping_min_delta: float = 0.001
     optimizer_name: str = "adam"
     momentum: float = 0.9
+    
     # Checkpointing Settings
     checkpoint_dir: str = "./checkpoints"               # Directory where checkpoints will be saved
     checkpoint_last_filename: str = "last.pt"           # Filename for most recent checkpoint
     checkpoint_save_interval: int = 5                   # Save checkpoint every N epochs
     checkpoint_best_filename: str = "best.pt"           # Filename for the best model checkpoint
+    
     # Learning Rate Scheduler Settings
     use_scheduler: bool = False                                # Enable/disable scheduling
     scheduler_type: str = "reduce_on_plateau"                  # Options: "step", "exponential", "cosine", "reduce_on_plateau"
@@ -57,6 +59,7 @@ class TrainerConfig:
     scheduler_gamma: float = 0.1                               # Factor to reduce LR
     scheduler_patience: int = 3                                # For ReduceLROnPlateau: epochs to wait before reducing
     scheduler_min_lr: float = 1e-6                             # Minimum learning rate (prevents it from going too low)
+    
     # Metrics Settings
     num_classes: int = 10                                        # Number of classes for classification metrics (e.g. F1)
 

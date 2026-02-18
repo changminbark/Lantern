@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Iterable, Optional, Union
 import torch
 import torch.nn as nn
-from my_engine.config import ModelConfig, ModelType, TrainerConfig
-from my_engine.model import MLP_Model
+from lantern.config import ModelConfig, ModelType, TrainerConfig
+from lantern.model import MLP_Model
 
 def accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
     """Compute classification accuracy from raw logits.

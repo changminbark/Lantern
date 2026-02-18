@@ -3,10 +3,10 @@
 import os
 from typing import Optional
 import torch
-from my_engine.trainer import Trainer
-from my_engine.utils import build_model, make_optimizer
+from lantern.trainer import Trainer
+from lantern.utils import build_model, make_optimizer
 import wandb
-from my_engine.config import ModelConfig, ModelType, TrainerConfig
+from lantern.config import ModelConfig, ModelType, TrainerConfig
 from torch.utils.data import DataLoader
 from torch import nn
 
@@ -76,20 +76,24 @@ def make_train_sweep(
             reinit=True,
             settings=wandb.Settings(x_stats_sampling_interval=2.0),
         )
+        
+        # Load fallback default configs
+        default_trainer_config = TrainerConfig()
+        default_model_config = ModelConfig()
 
         # Read hyperparameters from wandb.config (reads every time this closure is called, kind of like a global object)
         config = wandb.config
         print(f"wandb.config: {config}")
-        hidden_units = config["hidden_units"]
-        trainer_batch_size = config["trainer_batch_size"]
-        evaluator_batch_size = config["evaluator_batch_size"]
-        learning_rate = config["learning_rate"]
-        num_epochs = config["num_epochs"]
-        dropout = config["dropout"]
-        optimizer_name = config["optimizer_name"]
-        weight_decay = config["weight_decay"]
-        momentum = config["momentum"]
-        early_stopping_patience = config["early_stopping_patience"]
+        hidden_units = getattr(config, "hidden_units", default_model_config.hidden_units)
+        trainer_batch_size = getattr(config, "trainer_batch_size", default_trainer_config.trainer_batch_size)
+        evaluator_batch_size = getattr(config, "evaluator_batch_size", default_trainer_config.evaluator_batch_size)
+        learning_rate = getattr(config, "learning_rate", default_trainer_config.learning_rate)
+        num_epochs = getattr(config, "num_epochs", default_trainer_config.num_epochs)
+        dropout = getattr(config, "dropout", default_model_config.dropout)
+        optimizer_name = getattr(config, "optimizer_name", default_trainer_config.optimizer_name)
+        weight_decay = getattr(config, "weight_decay", default_trainer_config.weight_decay)
+        momentum = getattr(config, "momentum", default_trainer_config.momentum)
+        early_stopping_patience = getattr(config, "early_stopping_patience", default_trainer_config.early_stopping_patience)
 
         # Descriptive run name for the W&B dashboard
         hidden_str = "x".join(map(str, hidden_units))

@@ -8,9 +8,9 @@ import wandb
 from typing import Callable, Iterable, Tuple, Optional, Dict
 from dataclasses import asdict, dataclass
 
-from my_engine.config import TrainerConfig, ModelConfig
-from my_engine.metrics import Metrics, ALL_METRICS
-from my_engine.utils import accuracy_from_logits, make_lr_scheduler
+from lantern.config import TrainerConfig, ModelConfig
+from lantern.metrics import Metrics, ALL_METRICS
+from lantern.utils import accuracy_from_logits, make_lr_scheduler
 
 class Trainer:
     """A training loop wrapper that handles training, validation, and logging for PyTorch models."""
