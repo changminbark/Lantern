@@ -53,6 +53,14 @@ class Trainer:
         self.best_val_loss = float("inf")  # Default best validation loss
         self.patience_counter = 0  # How many epochs without improvement before stopping
 
+    def __enter__(self) -> "Trainer":
+        """Return self to support use as a context manager."""
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        """Finish the W&B run on context exit, even if an exception occurred."""
+        self.finish_run()
+
     def train_one_epoch(
         self, train_loader: torch.utils.data.DataLoader
     ) -> Tuple[float, float, float]:
@@ -77,9 +85,6 @@ class Trainer:
                 inputs.to(self.config.device),
                 targets.to(self.config.device),
             )
-
-            # Need to flatten the input into batch_size x flattened_dims
-            inputs = inputs.view(inputs.size(0), -1)
 
             # Forward pass, backprop, and parameter update
             self.optimizer.zero_grad()
@@ -128,9 +133,6 @@ class Trainer:
             for X_batch, y_batch in val_loader:
                 X_batch = X_batch.to(self.config.device)
                 y_batch = y_batch.to(self.config.device)
-
-                # Need to flatten the X_batch into batch_size x flattened_dims
-                X_batch = X_batch.view(X_batch.size(0), -1)
 
                 logits = self.model(X_batch)
                 loss = self.criterion(logits, y_batch)
@@ -205,10 +207,14 @@ class Trainer:
 
         # Update wandb's run config with ModelConfig and TrainerConfig
         if self.run is not None:
+            num_params, num_trainable_params = self.model.num_parameters()
             self.run.config.update(
                 {
                     "model_config": asdict(self.model.config),
                     "trainer_config": asdict(self.config),
+                    "num_params": num_params,
+                    "num_trainable_params": num_trainable_params,
+                    "pin_memory": self.config.pin_memory,
                 }
             )
 
@@ -294,7 +300,10 @@ class Trainer:
     def finish_run(self) -> None:
         """Unwatch the model and finish the W&B run. No-op if no run is active."""
         if self.run is not None:
-            wandb.unwatch(self.model)
+            try:
+                wandb.unwatch(self.model)
+            except Exception:
+                pass
             self.run.finish()
 
     def save_checkpoint(self, is_best: bool = False) -> None:

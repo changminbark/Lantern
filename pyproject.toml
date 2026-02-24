@@ -9,6 +9,7 @@ description = "Student project for CSCI 357 Coursework"
 dependencies = [
     "jupyter", "jupyterlab", "jupytext", "nbconvert", "ipython>=8.18.0", "ipykernel",
     "numpy", "pandas", "matplotlib",
+    "scipy==1.13.1",
     "scikit-learn", "statsmodels",
     "torch", "torchvision", "torchaudio", "torchmetrics",
     "fastapi", "uvicorn", "gradio", "streamlit",

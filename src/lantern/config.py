@@ -67,14 +67,35 @@ class TrainerConfig:
     # Metrics Settings
     num_classes: int = 10  # Number of classes for classification metrics (e.g. F1)
 
+    # DataLoader Settings
+    num_workers: int = 2
+    pin_memory: bool = True
 
 class ModelType(Enum):
     """Supported model architecture types."""
 
     MLP = "mlp"
+    CNN = "cnn"
 
     def __str__(self) -> str:
         return self.value
+    
+@dataclass
+class ConvBlockConfig:
+    """Configuration for a single [Conv2d -> ReLU -> MaxPool2d] block.
+
+    Attributes:
+        out_channels: Number of filters (output feature maps) for this block.
+        kernel_size: Spatial size of the convolution kernel.
+        stride: Stride of the convolution.
+        padding: Zero-padding added to both sides of the input.
+        pool_size: Kernel size for MaxPool2d. Set to 0 to skip pooling.
+    """
+    out_channels: int
+    kernel_size: int = 3
+    stride: int = 1
+    padding: int = 1
+    pool_size: int = 2
 
 
 @dataclass
@@ -90,6 +111,9 @@ class ModelConfig:
     model_type: ModelType = ModelType.MLP
     hidden_units: List[int] = field(default_factory=lambda: [128, 64])
     dropout: List[float] = field(default_factory=lambda: [0.1, 0.2])
+    # CNN Fields
+    conv_blocks: List[ConvBlockConfig] = field(default_factory=list)
+    in_channels: int = 1        # 1 for grayscale, 3 for RGB
 
     def __post_init__(self) -> None:
         """Convert model_type from string to ModelType enum if needed."""
@@ -101,3 +125,4 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown model_type '{self.model_type}'. Must be one of {valid}"
                 )
+
