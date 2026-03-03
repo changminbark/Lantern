@@ -8,7 +8,7 @@ import wandb
 from torch import nn
 from torch.utils.data import DataLoader
 
-from lantern.config import ConvBlockConfig, ModelConfig, ModelType, TrainerConfig
+from lantern.config import ConvBlockConfig, MetricsConfig, ModelConfig, ModelType, ResidualBlockConfig, TrainerConfig
 from lantern.trainer import Trainer
 from lantern.utils import build_model, make_optimizer
 
@@ -66,8 +66,8 @@ def make_train_sweep(
             For CNN models, a list/tuple of (height, width).
         num_outputs: Number of output classes.
         wandb_entity_name: Optional W&B entity (user or team) name.
-        checkpoint_resume: Bool of whether checkpointing is activated
-        wandb_name_prefix: Optional prefix (user's initial) to be appended to run name
+        checkpoint_resume: Bool of whether checkpointing is activated.
+        wandb_name_prefix: Optional prefix (user's initial) to be appended to run name.
 
     Returns:
         A no-arg function suitable for ``wandb.agent(sweep_id, function=...)``.
@@ -88,6 +88,7 @@ def make_train_sweep(
         # Load fallback default configs
         default_trainer_config = TrainerConfig()
         default_model_config = ModelConfig()
+        default_metrics_config = MetricsConfig()
 
         # Read hyperparameters from wandb.config (reads every time this closure is called, kind of like a global object)
         config = wandb.config
@@ -99,7 +100,30 @@ def make_train_sweep(
             config, "hidden_units", default_model_config.hidden_units
         )
         dropout = getattr(config, "dropout", default_model_config.dropout)
-        conv_blocks = [ConvBlockConfig(**b) for b in getattr(config, "conv_blocks", default_model_config.conv_blocks)]
+        use_GAP = getattr(config, "use_GAP", default_model_config.use_GAP)
+        
+        def _parse_conv_block(raw_block):
+            # Already-parsed dataclass objects are allowed
+            if isinstance(raw_block, (ConvBlockConfig, ResidualBlockConfig)):
+                return raw_block
+
+            if not isinstance(raw_block, dict):
+                raise TypeError(
+                    f"Each conv block must be a dict or block config object, got {type(raw_block)}"
+                )
+
+            block_data = dict(raw_block)  # copy so we can safely pop
+            block_type = block_data.pop("block_type", "conv")  # backward-compatible default
+
+            if block_type == "conv":
+                return ConvBlockConfig(**block_data)
+            if block_type == "residual":
+                return ResidualBlockConfig(**block_data)
+
+            raise ValueError(f"Unknown block_type '{block_type}' in conv_blocks")
+        
+        raw_blocks = getattr(config, "conv_blocks", default_model_config.conv_blocks)
+        conv_blocks = [_parse_conv_block(b) for b in raw_blocks]
         in_channels = getattr(config, "in_channels", default_model_config.in_channels)
         if model_type == ModelType.CNN and not conv_blocks:
             raise ValueError("CNN Config is missing conv_blocks")
@@ -167,7 +191,15 @@ def make_train_sweep(
             scheduler_gamma=scheduler_gamma,
             checkpoint_last_filename=wandb_project_name + "-last.pt",
             checkpoint_best_filename=wandb_project_name + "-best.pt",
-            num_classes=num_outputs,
+        )
+        # Metrics / output related hyperparameters
+        task = getattr(config, "task", default_metrics_config.task)
+        # num_classes is derived from num_outputs for multiclass; binary doesn't need it
+        num_classes = num_outputs if task != "binary" else None
+        metrics_config = MetricsConfig(
+            task=task,
+            num_classes=num_classes,
+            names=default_metrics_config.names,
         )
         model_config = ModelConfig(
             model_type=model_type,
@@ -175,6 +207,7 @@ def make_train_sweep(
             dropout=dropout,
             conv_blocks=conv_blocks,
             in_channels=in_channels,
+            use_GAP=use_GAP,
         )
 
         # Build model, optimizer, and criterion
@@ -190,6 +223,7 @@ def make_train_sweep(
             optimizer=optimizer,
             criterion=criterion,
             config=trainer_config,
+            metrics_config=metrics_config,
             run=run,
         )
         results = trainer.fit(
@@ -201,10 +235,10 @@ def make_train_sweep(
         parts = ["Run complete!"]
         if "val_loss" in results:
             parts.append(f"val_loss: {results['val_loss']:.4f}")
-        if "val_acc" in results:
-            parts.append(f"val_acc: {results['val_acc'] * 100:.2f}%")
-        if "val_f1_macro" in results:
-            parts.append(f"val_f1_macro: {results['val_f1_macro']:.4f}")
+        if "val_accuracy" in results:
+            parts.append(f"val_accuracy: {results['val_accuracy'] * 100:.2f}%")
+        if "val_f1" in results:
+            parts.append(f"val_f1: {results['val_f1']:.4f}")
         print(" ".join(parts))
 
     return train_sweep

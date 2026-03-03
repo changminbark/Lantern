@@ -7,10 +7,167 @@ Course: CSCI 357 - AI and Neural Networks
 Author: Chang Min Bark
 """
 
-from typing import Optional, Tuple
+import os
+from typing import List, Optional, Tuple
 
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
+
+
+class TabularDataset(Dataset):
+    """A PyTorch Dataset wrapping tabular (X, y) numpy arrays.
+
+    Attributes:
+        feature_names: List of input feature column names.
+        target_names: List of unique class label strings, ordered by label index.
+    """
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+        target_names: List[str],
+    ) -> None:
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.long)
+        self.feature_names = feature_names
+        self.target_names = target_names
+
+    def __len__(self) -> int:
+        return len(self.X)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.X[idx], self.y[idx]
+
+
+def get_ucimlrepo_datasets(
+    id: int,
+    test_size: float = 0.2,
+    random_state: int = 42,
+) -> Tuple[TabularDataset, TabularDataset]:
+    """Fetch a dataset from the UCI ML Repository and return stratified train/val splits.
+
+    Features are standardized using StandardScaler fit on the training split only.
+
+    Args:
+        id: UCI ML Repository dataset ID.
+        test_size: Fraction of data reserved for validation.
+        random_state: Random seed for reproducibility.
+
+    Returns:
+        A (train_dataset, val_dataset) tuple of TabularDataset instances.
+    """
+    from ucimlrepo import fetch_ucirepo
+
+    repo = fetch_ucirepo(id=id)
+    X: pd.DataFrame = repo.data.features
+    y: pd.DataFrame = repo.data.targets
+
+    # Drop rows with missing values
+    n_features = len(X.columns)
+    combined = pd.concat([X, y], axis=1).dropna()
+    X = combined.iloc[:, :n_features]
+    y = combined.iloc[:, n_features:]
+
+    feature_names: List[str] = X.columns.tolist()
+    target_col = y.columns[0]
+    y_vals = y[target_col].values.astype(int)
+
+    unique_labels = sorted(np.unique(y_vals))
+    target_names: List[str] = [str(label) for label in unique_labels]
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X.values,
+        y_vals,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=y_vals,
+    )
+
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_val = scaler.transform(X_val)
+
+    return (
+        TabularDataset(X_train, y_train, feature_names, target_names),
+        TabularDataset(X_val, y_val, feature_names, target_names),
+    )
+
+
+def get_kagglehub_datasets(
+    handle: str,
+    target_col: str,
+    test_size: float = 0.2,
+    random_state: int = 42,
+    drop_cols: Optional[List[str]] = None,
+    csv_filename: Optional[str] = None,
+) -> Tuple[TabularDataset, TabularDataset]:
+    """Download a Kaggle dataset via kagglehub and return stratified train/val splits.
+
+    Features are standardized using StandardScaler fit on the training split only.
+
+    Args:
+        handle: Kaggle dataset slug in ``"owner/dataset-name"`` format.
+        target_col: Name of the target column in the CSV.
+        test_size: Fraction of data reserved for validation.
+        random_state: Random seed for reproducibility.
+        drop_cols: Optional list of columns to drop before splitting X/y.
+        csv_filename: Specific CSV filename to load. If None, the first CSV found
+            in the downloaded directory is used.
+
+    Returns:
+        A (train_dataset, val_dataset) tuple of TabularDataset instances.
+    """
+    import kagglehub
+
+    path = kagglehub.dataset_download(handle)
+
+    if csv_filename is not None:
+        csv_path = os.path.join(path, csv_filename)
+    else:
+        csv_files = [f for f in os.listdir(path) if f.endswith(".csv")]
+        if not csv_files:
+            raise FileNotFoundError(f"No CSV files found in downloaded dataset at {path}")
+        csv_path = os.path.join(path, csv_files[0])
+
+    df = pd.read_csv(csv_path)
+
+    if drop_cols:
+        df = df.drop(columns=drop_cols, errors="ignore")
+
+    df = df.dropna()
+
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+
+    feature_names: List[str] = X.columns.tolist()
+    unique_labels = sorted(y.unique())
+    target_names: List[str] = [str(label) for label in unique_labels]
+
+    y_vals = y.values.astype(int)
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X.values.astype(np.float32),
+        y_vals,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=y_vals,
+    )
+
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_val = scaler.transform(X_val)
+
+    return (
+        TabularDataset(X_train, y_train, feature_names, target_names),
+        TabularDataset(X_val, y_val, feature_names, target_names),
+    )
 
 
 _DATASET_REGISTRY = {

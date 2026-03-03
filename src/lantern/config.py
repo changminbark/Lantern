@@ -11,7 +11,7 @@ Date: 2/16/2026
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 
@@ -64,12 +64,28 @@ class TrainerConfig:
         1e-6  # Minimum learning rate (prevents it from going too low)
     )
 
-    # Metrics Settings
-    num_classes: int = 10  # Number of classes for classification metrics (e.g. F1)
-
     # DataLoader Settings
     num_workers: int = 2
     pin_memory: bool = True
+
+@dataclass
+class MetricsConfig:
+    """Configuration for training metrics tracking and reporting.
+
+    Attributes:
+        task: torchmetrics task type. One of ``"binary"``, ``"multiclass"``,
+            ``"multilabel"``.
+        names: Metric names to compute and log. Supported values: ``"loss"``,
+            ``"accuracy"``, ``"f1"``, ``"precision"``, ``"recall"``.
+            Defaults to ``["loss", "accuracy", "f1"]``.
+        num_classes: Number of output classes. Required when
+            ``task="multiclass"``; ignored for ``task="binary"``.
+    """
+
+    task: str = "multiclass"
+    names: List[str] = field(default_factory=lambda: ["loss", "accuracy", "f1"])
+    num_classes: Optional[int] = None
+
 
 class ModelType(Enum):
     """Supported model architecture types."""
@@ -79,7 +95,7 @@ class ModelType(Enum):
 
     def __str__(self) -> str:
         return self.value
-    
+
 @dataclass
 class ConvBlockConfig:
     """Configuration for a single [Conv2d -> ReLU -> MaxPool2d] block.
@@ -96,7 +112,24 @@ class ConvBlockConfig:
     stride: int = 1
     padding: int = 1
     pool_size: int = 2
+    batch_norm: bool = False
+    
+@dataclass
+class ResidualBlockConfig:
+    """
+    Configuration for a single residual block. 
+    
+    This configuration specifies the parameters used to construct a residual block within a convolutional neural network.
+    It determines the number of output channels (filters) and the stride for the convolution, enabling the creation 
+    of blocks that support skip connections and flexible downsampling, as used in deep residual networks. 
+    NOTE: Remember - pool_size is intentionally omitted - stride handles downsampling 
 
+    Attributes:
+        out_channels: Number of filters (output feature maps) for this block
+        stride: Stride of the convolution.
+    """
+    out_channels: int
+    stride: int = 1
 
 @dataclass
 class ModelConfig:
@@ -112,8 +145,10 @@ class ModelConfig:
     hidden_units: List[int] = field(default_factory=lambda: [128, 64])
     dropout: List[float] = field(default_factory=lambda: [0.1, 0.2])
     # CNN Fields
-    conv_blocks: List[ConvBlockConfig] = field(default_factory=list)
+    conv_blocks: List[Union[ConvBlockConfig, ResidualBlockConfig]] = field(default_factory=list)
     in_channels: int = 1        # 1 for grayscale, 3 for RGB
+    # Global Average Pooling
+    use_GAP: bool = False
 
     def __post_init__(self) -> None:
         """Convert model_type from string to ModelType enum if needed."""

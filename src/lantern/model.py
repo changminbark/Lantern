@@ -4,7 +4,7 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 
-from lantern.config import ModelConfig, ModelType
+from lantern.config import ModelConfig, ModelType, ResidualBlockConfig
 
 
 class MLP_Model(nn.Module):
@@ -79,6 +79,83 @@ class MLP_Model(nn.Module):
         """Return the same string as __str__ for consistent display."""
         return str(self)
 
+class ResidualBlock(nn.Module):
+    """
+    Implements a single residual block inspired by the architecture introduced in ResNet (He et al., 2015).
+
+    This block consists of two convolutional layers each followed by batch normalization,
+    with a skip connection (shortcut path) from the input to the output. The main idea
+    is to allow the network to learn residual mappings, which helps in training deeper
+    neural networks by alleviating the vanishing gradient problem and making optimization easier.
+
+    Architecture:
+        x --> Conv -> BN -> ReLU -> Conv -> BN --> (+) -> ReLU -> out
+        |                                          ^
+        └──────────── shortcut (identity or 1x1) ──┘
+
+    If in_channels != out_channels or stride != 1, the shortcut uses a 1x1 convolution (with batch norm)
+    to match the shape of the main path; otherwise, it is the identity.
+
+    References:
+        Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun.
+        "Deep Residual Learning for Image Recognition." arXiv preprint arXiv:1512.03385 (2015).
+    """
+    def __init__(self, in_channels: int, res_config: ResidualBlockConfig):
+        super().__init__()
+        # Build the two-conv "residual path", and don't forget that no bias is 
+        # necessary for the convolutions because batch norm has its own bias.
+        res_path_layers = []
+        # Downsizing (via stride) and filter/feature extraction (in_channel -> out_channel) happens in the first conv layer
+        res_path_layers.append(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=res_config.out_channels,
+                kernel_size=3,
+                stride=res_config.stride,
+                padding=1,
+                bias=False,
+            )
+        )
+        res_path_layers.append(nn.BatchNorm2d(res_config.out_channels))
+        res_path_layers.append(nn.ReLU())
+        res_path_layers.append(
+            nn.Conv2d(
+                in_channels=res_config.out_channels,
+                out_channels=res_config.out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False,
+            )
+        )
+        res_path_layers.append(nn.BatchNorm2d(res_config.out_channels))
+        self.res_path = nn.Sequential(*res_path_layers)
+
+        # If dimensions change, use a 1x1 conv to project x to the right shape.
+        # Otherwise, the shortcut is just the identity (nn.Sequential() with no layers).
+        self.shortcut = nn.Sequential()
+        if res_config.stride != 1 or in_channels != res_config.out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(
+                    in_channels=in_channels,
+                    out_channels=res_config.out_channels,
+                    kernel_size=1,
+                    stride=res_config.stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(res_config.out_channels),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. Pass x through conv1 -> bn1 -> relu
+        # 2. Pass through conv2 -> bn2
+        # 3. Add the shortcut(x)
+        # 4. Apply final ReLU
+        res_path_output = self.res_path(x)
+        shortcut_output = self.shortcut(x)
+        x = res_path_output + shortcut_output
+        return nn.functional.relu(x)
+
 class CNN_Model(nn.Module):
     """Convolutional Neural Network following the [Conv2d -> ReLU -> MaxPool2d] x N motif.
 
@@ -91,10 +168,11 @@ class CNN_Model(nn.Module):
     """
 
     def __init__(self,
-        input_height: int,
-        input_width: int,
-        num_outputs: int,
-        config: ModelConfig) -> None:
+            input_height: int,
+            input_width: int,
+            num_outputs: int,
+            config: ModelConfig
+        ) -> None:
         super().__init__()
 
         if config.model_type != ModelType.CNN:
@@ -116,22 +194,38 @@ class CNN_Model(nn.Module):
         conv_layers = []
         current_in_channels = self.config.in_channels
         for conv_block in self.config.conv_blocks:
-            conv_layers.append(nn.Conv2d(current_in_channels, conv_block.out_channels, conv_block.kernel_size, conv_block.stride, conv_block.padding))
-            conv_layers.append(nn.BatchNorm2d(conv_block.out_channels))
-            conv_layers.append(nn.ReLU())
-            if conv_block.pool_size > 0:
-                conv_layers.append(nn.MaxPool2d(conv_block.pool_size))
+            if isinstance(conv_block, ResidualBlockConfig):
+                conv_layers.append(ResidualBlock(current_in_channels, conv_block))
+            else:
+                conv_layers.append(
+                    nn.Conv2d(
+                        current_in_channels, 
+                        conv_block.out_channels, 
+                        conv_block.kernel_size, 
+                        conv_block.stride, 
+                        conv_block.padding
+                    )
+                )
+                if conv_block.batch_norm:
+                    conv_layers.append(nn.BatchNorm2d(conv_block.out_channels))
+                conv_layers.append(nn.ReLU())
+                if conv_block.pool_size > 0:
+                    conv_layers.append(nn.MaxPool2d(conv_block.pool_size))
             current_in_channels = conv_block.out_channels
             
         self.feature_extractor = nn.Sequential(*conv_layers)
 
-        # --- Compute flattened feature dimension via dummy forward pass ---
-        # Create a dummy tensor of shape (1, in_channels, input_height, input_width),
-        # pass it through self.feature_extractor, and store the total number of elements
-        # as self._flat_features.
-        with torch.no_grad():
-            sample_tensor = torch.ones((1, self.config.in_channels, self.input_height, self.input_width))
-            self._flat_features = self.feature_extractor(sample_tensor).numel()
+        if config.use_GAP:
+            self.gap = nn.AdaptiveAvgPool2d((1, 1))
+            self._flat_features = current_in_channels
+        else:
+            self.gap = None
+            # --- Compute flattened feature dimension via dummy forward pass ---
+            with torch.no_grad():
+                self.feature_extractor.eval()
+                sample_tensor = torch.ones((1, self.config.in_channels, self.input_height, self.input_width))
+                self._flat_features = self.feature_extractor(sample_tensor).numel()
+                self.feature_extractor.train()
 
         # --- Build the classifier head ---
         # Build self.classifier_head as an nn.Sequential.
@@ -153,9 +247,15 @@ class CNN_Model(nn.Module):
         self.classifier_head = nn.Sequential(*classifier_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Pass x through self.feature_extractor, flatten, then self.classifier_head
+        # Pass x through self.feature_extractor, flatten/GAP, then self.classifier_head
         x = self.feature_extractor(x)
-        x = x.view(x.shape[0], -1)
+        # If GAP is enabled, apply global average pooling and squeeze spatial dimensions
+        if self.gap is not None:
+            x = self.gap(x)                 # (batch, channels, 1, 1)
+            x = x.squeeze(-1).squeeze(-1)   # (batch, channels)
+        # Otherwise, flatten the feature maps into a 1D vector for the classifier head.
+        else:
+            x = torch.flatten(x, start_dim=1)
         x = self.classifier_head(x)
         return x
 
@@ -165,12 +265,21 @@ class CNN_Model(nn.Module):
         return total_params, trainable_params
 
     def get_architecture_config(self) -> dict:
+        def _serialize_config() -> dict:
+            config_dict = asdict(self.config)  # still use asdict for everything else
+            config_dict['conv_blocks'] = [
+                {'block_type': 'residual', **asdict(b)} if isinstance(b, ResidualBlockConfig)
+                else {'block_type': 'conv', **asdict(b)}
+                for b in self.config.conv_blocks
+            ]
+            return config_dict
+        
         return {
             'model_type': self.config.model_type,
             'input_height': self.input_height,
             'input_width': self.input_width,
             'num_outputs': self.num_outputs,
-            'config': asdict(self.config),
+            'config': _serialize_config(),
         }
 
     def __str__(self) -> str:
@@ -182,10 +291,11 @@ class CNN_Model(nn.Module):
         Returns:
             str: Human-readable summary of model architecture and size.
         """
-        blocks_summary = "[" + ", ".join(
-            f"({b.out_channels}, k={b.kernel_size}, s={b.stride}, p={b.padding})"
-            for b in self.config.conv_blocks
-        ) + "]"
+        def block_str(b):
+            if isinstance(b, ResidualBlockConfig):
+                return f"Residual(out={b.out_channels}, s={b.stride})"
+            return f"Conv(out={b.out_channels}, k={b.kernel_size}, s={b.stride}, p={b.padding}, bn={b.batch_norm})"
+        blocks_summary = "[" + ", ".join(block_str(b) for b in self.config.conv_blocks) + "]"
         hidden_str = ", ".join(str(u) for u in self.config.hidden_units)
         head_summary = f"[{self._flat_features} -> [{hidden_str}] -> {self.num_outputs}]"
         dropout_summary = "[" + ", ".join(str(d) for d in self.config.dropout) + "]"

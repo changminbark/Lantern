@@ -8,8 +8,7 @@ import torch.optim as optim
 import torchmetrics
 import wandb
 
-from lantern.config import TrainerConfig
-from lantern.metrics import ALL_METRICS, Metrics
+from lantern.config import MetricsConfig, TrainerConfig
 from lantern.utils import accuracy_from_logits, make_lr_scheduler
 
 
@@ -22,6 +21,7 @@ class Trainer:
         optimizer: optim.Optimizer,
         criterion: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         config: TrainerConfig = TrainerConfig(),
+        metrics_config: Optional[MetricsConfig] = None,
         run: Optional[wandb.Run] = None,
     ) -> None:
         """Initialize the trainer with a model, optimizer, loss function, and optional W&B run.
@@ -31,12 +31,15 @@ class Trainer:
             optimizer: The optimizer for updating model parameters.
             criterion: Loss function mapping (predictions, targets) -> scalar loss.
             config: Training hyperparameters and device settings.
+            metrics_config: Which metrics to compute and log. Defaults to
+                ``MetricsConfig()`` (loss, accuracy, and macro F1 for multiclass).
             run: Optional Weights & Biases run for experiment tracking.
         """
         self.model = model.to(config.device)
         self.optimizer = optimizer
         self.criterion = criterion
         self.config = config
+        self.metrics_config = metrics_config or MetricsConfig()
         self.run = run
         if self.run is not None:
             wandb.watch(self.model, log="all", log_freq=1)
@@ -53,6 +56,32 @@ class Trainer:
         self.best_val_loss = float("inf")  # Default best validation loss
         self.patience_counter = 0  # How many epochs without improvement before stopping
 
+    def _build_torchmetrics(self) -> Dict[str, torchmetrics.Metric]:
+        """Build fresh torchmetrics instances for the names in metrics_config."""
+        cfg = self.metrics_config
+        base_kwargs: Dict = {"task": cfg.task}
+        if cfg.task == "multiclass":
+            if cfg.num_classes is None:
+                raise ValueError(
+                    "MetricsConfig.num_classes is required when task='multiclass'"
+                )
+            base_kwargs["num_classes"] = cfg.num_classes
+        avg_kwargs = {} if cfg.task == "binary" else {"average": "macro"}
+
+        name_to_cls = {
+            "accuracy": (torchmetrics.Accuracy, {}),
+            "f1": (torchmetrics.F1Score, avg_kwargs),
+            "precision": (torchmetrics.Precision, avg_kwargs),
+            "recall": (torchmetrics.Recall, avg_kwargs),
+        }
+
+        result: Dict[str, torchmetrics.Metric] = {}
+        for name in cfg.names:
+            if name in name_to_cls:
+                cls, extra = name_to_cls[name]
+                result[name] = cls(**base_kwargs, **extra).to(self.config.device)
+        return result
+
     def __enter__(self) -> "Trainer":
         """Return self to support use as a context manager."""
         return self
@@ -63,22 +92,20 @@ class Trainer:
 
     def train_one_epoch(
         self, train_loader: torch.utils.data.DataLoader
-    ) -> Tuple[float, float, float]:
+    ) -> Dict[str, float]:
         """Run one training epoch over the entire train_loader.
 
         Args:
             train_loader: DataLoader yielding (inputs, targets) batches.
 
         Returns:
-            A tuple of (average_loss, average_accuracy, f1_macro) for the epoch.
+            A dict mapping metric name to its epoch-average value. Always
+            includes ``"loss"``; additional keys match ``metrics_config.names``.
         """
         self.model.train()
         total_loss = 0.0
-        total_acc = 0.0
         total_samples = 0
-        f1_macro_metric = torchmetrics.F1Score(
-            task="multiclass", num_classes=self.config.num_classes, average="macro"
-        ).to(self.config.device)
+        tm_metrics = self._build_torchmetrics()
 
         for inputs, targets in train_loader:
             inputs, targets = (
@@ -93,41 +120,38 @@ class Trainer:
             loss.backward()
             self.optimizer.step()
 
-            # Accumulate weighted loss and accuracy for averaging
             batch_size = inputs.size(0)
             total_loss += loss.item() * batch_size
-            total_acc += accuracy_from_logits(outputs, targets) * batch_size
             total_samples += batch_size
 
-            # Accumulate predictions for F1 computation
-            f1_macro_metric.update(outputs, targets)
+            for m in tm_metrics.values():
+                m.update(outputs, targets)
 
         if total_samples == 0:
-            return 0.0, 0.0, 0.0
+            return {"loss": 0.0}
 
-        avg_loss = total_loss / total_samples
-        avg_acc = total_acc / total_samples
-        avg_f1_macro = f1_macro_metric.compute().item()
-        return avg_loss, avg_acc, avg_f1_macro
+        result: Dict[str, float] = {"loss": total_loss / total_samples}
+        for name, m in tm_metrics.items():
+            result[name] = m.compute().item()
+        return result
 
     def validate(
         self, val_loader: torch.utils.data.DataLoader
-    ) -> Tuple[float, float, float]:
+    ) -> Dict[str, float]:
         """Evaluate the model on a validation set without updating parameters.
 
         Args:
             val_loader: DataLoader yielding (inputs, targets) batches.
 
         Returns:
-            A tuple of (average_loss, average_accuracy, f1_macro) over the validation set.
+            A dict mapping metric name to its average value over the validation
+            set. Always includes ``"loss"``; additional keys match
+            ``metrics_config.names``.
         """
         self.model.eval()
         running_loss = 0.0
-        running_acc = 0.0
         total_samples = 0
-        f1_macro_metric = torchmetrics.F1Score(
-            task="multiclass", num_classes=self.config.num_classes, average="macro"
-        ).to(self.config.device)
+        tm_metrics = self._build_torchmetrics()
 
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
@@ -136,24 +160,21 @@ class Trainer:
 
                 logits = self.model(X_batch)
                 loss = self.criterion(logits, y_batch)
-                batch_acc = accuracy_from_logits(logits, y_batch)
 
-                # Weight metrics by batch size for correct averaging
                 batch_size = X_batch.size(0)
                 running_loss += loss.item() * batch_size
-                running_acc += batch_acc * batch_size
                 total_samples += batch_size
 
-                # Accumulate predictions for F1 computation
-                f1_macro_metric.update(logits, y_batch)
+                for m in tm_metrics.values():
+                    m.update(logits, y_batch)
 
         if total_samples == 0:
-            return 0.0, 0.0, 0.0
+            return {"loss": 0.0}
 
-        avg_loss = running_loss / total_samples
-        avg_acc = running_acc / total_samples
-        avg_f1_macro = f1_macro_metric.compute().item()
-        return avg_loss, avg_acc, avg_f1_macro
+        result: Dict[str, float] = {"loss": running_loss / total_samples}
+        for name, m in tm_metrics.items():
+            result[name] = m.compute().item()
+        return result
 
     def fit(
         self,
@@ -161,7 +182,6 @@ class Trainer:
         val_loader: torch.utils.data.DataLoader,
         resume_from_last_checkpoint: bool = False,
         override_num_epochs: Optional[int] = None,
-        *metrics: Metrics,
     ) -> Dict[str, float]:
         """Run the full training loop with checkpointing and early stopping.
 
@@ -176,20 +196,15 @@ class Trainer:
                 training so the loop resumes from where it left off.
             override_num_epochs: If provided, train for this many epochs instead
                 of config.num_epochs.
-            *metrics: Variable number of Metrics enum values specifying which
-                metrics to log and return. Defaults to all metrics if none provided.
 
         Returns:
-            A dict with final metrics filtered by the requested metrics.
+            A dict with ``"train_<name>"`` and ``"val_<name>"`` keys for every
+            name in ``metrics_config.names``, plus ``"num_epochs"``.
 
         Raises:
             ValueError: If train_loader.batch_size doesn't match config.trainer_batch_size.
         """
-        # Default to all metrics if none specified
-        active_metrics = set(metrics) if metrics else set(ALL_METRICS)
-        log_loss = Metrics.LOSS in active_metrics
-        log_acc = Metrics.ACC in active_metrics
-        log_f1_macro = Metrics.F1_MACRO in active_metrics
+        active_names = self.metrics_config.names
 
         # Sanity check: Verify the batch sizes match the config supplied
         if hasattr(train_loader, "batch_size") and train_loader.batch_size is not None:
@@ -224,38 +239,35 @@ class Trainer:
             else self.config.num_epochs
         )
 
+        train_metrics: Dict[str, float] = {}
+        val_metrics: Dict[str, float] = {}
+
         for epoch in range(self.start_epoch, num_epochs):
             self.current_epoch = epoch
 
-            # Train and validate
-            train_loss, train_acc, train_f1_macro = self.train_one_epoch(train_loader)
-            val_loss, val_acc, val_f1_macro = self.validate(val_loader)
+            train_metrics = self.train_one_epoch(train_loader)
+            val_metrics = self.validate(val_loader)
 
-            # Build print and wandb log entries based on active metrics
+            # Build per-epoch print output and wandb log dict
             parts = [f"Epoch {epoch}:"]
-            wandb_log = {"epoch": epoch}
-            if log_loss:
-                parts.append(f"Train Loss={train_loss:.4f}")
-                parts.append(f"Val Loss={val_loss:.4f}")
-                wandb_log["train_loss"] = train_loss
-                wandb_log["val_loss"] = val_loss
-            if log_acc:
-                parts.append(f"Train Acc={train_acc:.4f}")
-                parts.append(f"Val Acc={val_acc * 100:.2f}%")
-                wandb_log["train_acc"] = train_acc
-                wandb_log["val_acc"] = val_acc
-            if log_f1_macro:
-                parts.append(f"Train F1 Macro={train_f1_macro:.4f}")
-                parts.append(f"Val F1 Macro={val_f1_macro:.4f}")
-                wandb_log["train_f1_macro"] = train_f1_macro
-                wandb_log["val_f1_macro"] = val_f1_macro
+            wandb_log: Dict[str, float] = {"epoch": epoch}
+            for name in active_names:
+                t_val = train_metrics.get(name, 0.0)
+                v_val = val_metrics.get(name, 0.0)
+                if name == "accuracy":
+                    parts.append(f"Train Accuracy={t_val:.4f}  Val Accuracy={v_val * 100:.2f}%")
+                else:
+                    label = name.capitalize() if name != "loss" else "Loss"
+                    parts.append(f"Train {label}={t_val:.4f}  Val {label}={v_val:.4f}")
+                wandb_log[f"train_{name}"] = t_val
+                wandb_log[f"val_{name}"] = v_val
             print("\n".join(parts))
 
-            # Log to wandb
             if self.run is not None:
                 self.run.log(wandb_log)
 
-            # Check and update best val
+            # Early stopping uses val_loss (always computed even if not in names)
+            val_loss = val_metrics["loss"]
             if val_loss < self.best_val_loss - self.config.early_stopping_min_delta:
                 self.best_val_loss = val_loss
                 self.save_checkpoint(is_best=True)
@@ -285,16 +297,10 @@ class Trainer:
             if (self.current_epoch + 1) % self.config.checkpoint_save_interval == 0:
                 self.save_checkpoint(is_best=False)
 
-        result = {"num_epochs": epoch + 1}
-        if log_loss:
-            result["train_loss"] = train_loss
-            result["val_loss"] = val_loss
-        if log_acc:
-            result["train_acc"] = train_acc
-            result["val_acc"] = val_acc
-        if log_f1_macro:
-            result["train_f1_macro"] = train_f1_macro
-            result["val_f1_macro"] = val_f1_macro
+        result: Dict[str, float] = {"num_epochs": epoch + 1}
+        for name in active_names:
+            result[f"train_{name}"] = train_metrics.get(name, 0.0)
+            result[f"val_{name}"] = val_metrics.get(name, 0.0)
         return result
 
     def finish_run(self) -> None:
