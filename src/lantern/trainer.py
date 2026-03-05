@@ -60,16 +60,21 @@ class Trainer:
         """Build fresh torchmetrics instances for the names in metrics_config."""
         cfg = self.metrics_config
         base_kwargs: Dict = {"task": cfg.task}
+        
+        # If metrics task is multi class
         if cfg.task == "multiclass":
-            if cfg.num_classes is None:
+            if self.model.num_outputs is None:
                 raise ValueError(
-                    "MetricsConfig.num_classes is required when task='multiclass'"
+                    "self.model.num_outputs is required when task='multiclass'"
                 )
-            base_kwargs["num_classes"] = cfg.num_classes
+            base_kwargs["num_classes"] = self.model.num_outputs
+            
+        # Keyword arguments for average metrics
         avg_kwargs = {} if cfg.task == "binary" else {"average": "macro"}
 
+        # List of available metrics
         name_to_cls = {
-            "accuracy": (torchmetrics.Accuracy, {}),
+            "accuracy": (torchmetrics.Accuracy, avg_kwargs),
             "f1": (torchmetrics.F1Score, avg_kwargs),
             "precision": (torchmetrics.Precision, avg_kwargs),
             "recall": (torchmetrics.Recall, avg_kwargs),
@@ -116,7 +121,10 @@ class Trainer:
             # Forward pass, backprop, and parameter update
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
-            loss = self.criterion(outputs, targets)
+            if self.metrics_config.task == "binary":
+                loss = self.criterion(outputs.squeeze(-1), targets.float())
+            else:
+                loss = self.criterion(outputs, targets)
             loss.backward()
             self.optimizer.step()
 
@@ -124,8 +132,9 @@ class Trainer:
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
+            preds = outputs.squeeze(-1) if self.metrics_config.task == "binary" else outputs
             for m in tm_metrics.values():
-                m.update(outputs, targets)
+                m.update(preds, targets)
 
         if total_samples == 0:
             return {"loss": 0.0}
@@ -159,14 +168,18 @@ class Trainer:
                 y_batch = y_batch.to(self.config.device)
 
                 logits = self.model(X_batch)
-                loss = self.criterion(logits, y_batch)
+                if self.metrics_config.task == "binary":
+                    loss = self.criterion(logits.squeeze(-1), y_batch.float())
+                else:
+                    loss = self.criterion(logits, y_batch)
 
                 batch_size = X_batch.size(0)
                 running_loss += loss.item() * batch_size
                 total_samples += batch_size
 
+                preds = logits.squeeze(-1) if self.metrics_config.task == "binary" else logits
                 for m in tm_metrics.values():
-                    m.update(logits, y_batch)
+                    m.update(preds, y_batch)
 
         if total_samples == 0:
             return {"loss": 0.0}
@@ -227,8 +240,8 @@ class Trainer:
                 {
                     "model_config": asdict(self.model.config),
                     "trainer_config": asdict(self.config),
-                    "num_params": num_params,
-                    "num_trainable_params": num_trainable_params,
+                    "num_parameters": num_params,
+                    "num_train_parameters": num_trainable_params,
                     "pin_memory": self.config.pin_memory,
                 }
             )
@@ -255,16 +268,13 @@ class Trainer:
                 t_val = train_metrics.get(name, 0.0)
                 v_val = val_metrics.get(name, 0.0)
                 if name == "accuracy":
-                    parts.append(f"Train Accuracy={t_val:.4f}  Val Accuracy={v_val * 100:.2f}%")
+                    parts.append(f"Train Accuracy={t_val * 100:.2f}%  Val Accuracy={v_val * 100:.2f}%")
                 else:
                     label = name.capitalize() if name != "loss" else "Loss"
                     parts.append(f"Train {label}={t_val:.4f}  Val {label}={v_val:.4f}")
                 wandb_log[f"train_{name}"] = t_val
                 wandb_log[f"val_{name}"] = v_val
             print("\n".join(parts))
-
-            if self.run is not None:
-                self.run.log(wandb_log)
 
             # Early stopping uses val_loss (always computed even if not in names)
             val_loss = val_metrics["loss"]
@@ -284,10 +294,11 @@ class Trainer:
                     # Other schedulers just need to know an epoch completed
                     self.scheduler.step()
 
-                # Log current learning rate to W&B
                 current_lr = self.optimizer.param_groups[0]["lr"]
-                if self.run is not None:
-                    self.run.log({"learning_rate": current_lr}, step=self.current_epoch)
+                wandb_log["learning_rate"] = current_lr
+
+            if self.run is not None:
+                self.run.log(wandb_log, step=epoch)
 
             # Early stop if patience counter has reached threshold
             if self.patience_counter == self.config.early_stopping_patience:

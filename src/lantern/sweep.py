@@ -8,7 +8,7 @@ import wandb
 from torch import nn
 from torch.utils.data import DataLoader
 
-from lantern.config import ConvBlockConfig, MetricsConfig, ModelConfig, ModelType, ResidualBlockConfig, TrainerConfig
+from lantern.config import ConvBlockConfig, MetricsConfig, ModelConfig, ModelType, ResidualBlockConfig, TrainerConfig, _parse_conv_block
 from lantern.trainer import Trainer
 from lantern.utils import build_model, make_optimizer
 
@@ -52,6 +52,8 @@ def make_train_sweep(
     wandb_entity_name: Optional[str] = None,
     checkpoint_resume: bool = False,
     wandb_name_prefix: Optional[str] = None,
+    metrics_config_param: Optional[MetricsConfig] = None,
+    class_weights: Optional[torch.Tensor] = None,
 ) -> callable:
     """Create a training function for use with a W&B sweep agent.
 
@@ -68,6 +70,11 @@ def make_train_sweep(
         wandb_entity_name: Optional W&B entity (user or team) name.
         checkpoint_resume: Bool of whether checkpointing is activated.
         wandb_name_prefix: Optional prefix (user's initial) to be appended to run name.
+        class_weights: Optional per-class weight tensor from
+            ``TabularDataset.get_class_weights()``. For binary tasks the positive-class
+            weight (index 1) is passed as ``pos_weight`` to ``BCEWithLogitsLoss``; for
+            multiclass tasks the full tensor is passed as ``weight`` to
+            ``CrossEntropyLoss``.
 
     Returns:
         A no-arg function suitable for ``wandb.agent(sweep_id, function=...)``.
@@ -75,6 +82,7 @@ def make_train_sweep(
     train_dataset, val_dataset = datasets
 
     def train_sweep():
+        """Execute a single sweep run: read wandb.config, build and train a model."""
         # Initialize a W&B run (sweep controller populates wandb.config)
         # The values passed by the factory function are essentially captured/hardcoded for duration of closure's lifetime
         # When the agent calls train_sweep, wandb.init connects to the sweep controller and poplate wandb.config
@@ -101,26 +109,6 @@ def make_train_sweep(
         )
         dropout = getattr(config, "dropout", default_model_config.dropout)
         use_GAP = getattr(config, "use_GAP", default_model_config.use_GAP)
-        
-        def _parse_conv_block(raw_block):
-            # Already-parsed dataclass objects are allowed
-            if isinstance(raw_block, (ConvBlockConfig, ResidualBlockConfig)):
-                return raw_block
-
-            if not isinstance(raw_block, dict):
-                raise TypeError(
-                    f"Each conv block must be a dict or block config object, got {type(raw_block)}"
-                )
-
-            block_data = dict(raw_block)  # copy so we can safely pop
-            block_type = block_data.pop("block_type", "conv")  # backward-compatible default
-
-            if block_type == "conv":
-                return ConvBlockConfig(**block_data)
-            if block_type == "residual":
-                return ResidualBlockConfig(**block_data)
-
-            raise ValueError(f"Unknown block_type '{block_type}' in conv_blocks")
         
         raw_blocks = getattr(config, "conv_blocks", default_model_config.conv_blocks)
         conv_blocks = [_parse_conv_block(b) for b in raw_blocks]
@@ -193,14 +181,16 @@ def make_train_sweep(
             checkpoint_best_filename=wandb_project_name + "-best.pt",
         )
         # Metrics / output related hyperparameters
-        task = getattr(config, "task", default_metrics_config.task)
-        # num_classes is derived from num_outputs for multiclass; binary doesn't need it
-        num_classes = num_outputs if task != "binary" else None
-        metrics_config = MetricsConfig(
-            task=task,
-            num_classes=num_classes,
-            names=default_metrics_config.names,
-        )
+        if metrics_config_param:
+            metrics_config = metrics_config_param
+        else:
+            metric_task = getattr(config, "metric_task", default_metrics_config.task)
+            metric_names = getattr(config, "metric_names", default_metrics_config.names)
+            metrics_config = MetricsConfig(
+                task=metric_task,
+                names=metric_names,
+            )
+        
         model_config = ModelConfig(
             model_type=model_type,
             hidden_units=hidden_units,
@@ -215,7 +205,12 @@ def make_train_sweep(
             input_spec=input_spec, num_outputs=num_outputs, config=model_config
         )
         optimizer = make_optimizer(model.parameters(), trainer_config)
-        criterion = nn.CrossEntropyLoss()
+        if metrics_config.task == "binary":
+            pos_weight = class_weights[1].to(device) if class_weights is not None else None
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        else:
+            weight = class_weights.to(device) if class_weights is not None else None
+            criterion = nn.CrossEntropyLoss(weight=weight)
 
         # Train (pass run so Trainer logs to this W&B run)
         trainer = Trainer(
@@ -239,6 +234,10 @@ def make_train_sweep(
             parts.append(f"val_accuracy: {results['val_accuracy'] * 100:.2f}%")
         if "val_f1" in results:
             parts.append(f"val_f1: {results['val_f1']:.4f}")
+        if "val_precision" in results:
+            parts.append(f"val_precision: {results['val_precision']:.4f}")
+        if "val_recall" in results:
+            parts.append(f"val_recall: {results['val_recall']:.4f}")
         print(" ".join(parts))
 
     return train_sweep

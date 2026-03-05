@@ -15,8 +15,11 @@ import os
 from pathlib import Path
 from typing import Iterable, List, Optional, Union
 
+import numpy as np
+
 import torch
 import torch.nn as nn
+from sklearn.metrics import confusion_matrix
 
 from lantern.config import ModelConfig, ModelType, TrainerConfig
 from lantern.model import CNN_Model, MLP_Model
@@ -303,3 +306,123 @@ def lr_range_test(
 
     # Return recorded learning rates and corresponding losses
     return lrs, losses
+
+def compute_confusion_matrix(
+    model: nn.Module,
+    data_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> tuple[np.ndarray, list[int], list[int]]:
+    """Compute a confusion matrix by running the model over the entire dataset.
+
+    Args:
+        model: Trained model.
+        data_loader: DataLoader for the evaluation set.
+        device: Device to run inference on.
+
+    Returns:
+        Tuple of (confusion_matrix as numpy array, all_preds list, all_labels list)
+    """
+
+    was_training = model.training                                                                                                                                                             
+    model.eval()                                                                                                                                                                              
+    model.to(device)                                                                                                                                                                        
+
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for inputs, labels in data_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            # Binary: threshold logit at 0 (equivalent to sigmoid >= 0.5)
+            # Multiclass: argmax over class dimension
+            if outputs.shape[1] == 1:
+                preds = (outputs.squeeze(-1) >= 0.0).long().cpu().tolist()
+            else:
+                preds = torch.argmax(outputs, dim=1).cpu().tolist()
+            all_preds.extend(preds)
+            all_labels.extend(labels.cpu().tolist())
+
+    if was_training:
+        model.train()
+
+    cm = confusion_matrix(all_labels, all_preds)
+    return cm, all_preds, all_labels
+
+def compute_saliency_map(
+    model: nn.Module,
+    image_tensor: torch.Tensor,
+    target_class: int = None,
+    device: torch.device = None,
+) -> tuple[np.ndarray, int]:
+    """Compute a saliency map for a single image.
+
+    The saliency map highlights which pixels most influence the model's
+    prediction by computing |d(score_c) / d(input)|.
+
+    Args:
+        model: Trained model (will be set to eval mode).
+        image_tensor: Single image tensor of shape (C, H, W). Do NOT include batch dim.
+        target_class: Class index to compute saliency for.
+                      If None, uses the model's predicted class (argmax).
+        device: Device for computation. If None, uses the model's device.
+
+    Returns:
+        Tuple of (saliency_map as 2D numpy array normalized to [0, 1],
+                  target_class index used).
+    """
+    model.eval()
+
+    # If device is not specified, infer from model parameters
+    if device is None:
+        device = next(model.parameters()).device
+
+    # Add batch dimension, move to device, and enable gradient tracking
+    image_tensor = image_tensor.unsqueeze(0).to(device=device)
+    image_tensor.requires_grad_()
+
+    # Forward pass
+    output_logits = model(image_tensor)
+
+    # Use predicted class if target_class not specified
+    if target_class is None:
+        target_class = torch.argmax(output_logits, dim=1).item()
+
+    # Backpropagate from the target class score (all the way to image_tensor input)
+    model.zero_grad()
+    score = output_logits[0, target_class]
+    score.backward()
+
+    # Extract gradients for each input pixel: shape (1, C, H, W) -> (C, H, W)
+    saliency = image_tensor.grad.data.abs().squeeze(0)
+
+    # For multi-channel images take max across channels -> (H, W)
+    saliency, _ = torch.max(saliency, dim=0)
+
+    # Normalize to [0, 1]
+    saliency = saliency - saliency.min()
+    saliency = saliency / (saliency.max() + 1e-8)
+
+    return saliency.cpu().numpy(), target_class
+
+def denormalize_image(
+        tensor: torch.tensor, 
+        mean: Optional[tuple] =(0.5, 0.5, 0.5), 
+        std: Optional[tuple] = (0.5, 0.5, 0.5),
+    ):
+    """
+    Denormalizes a tensor image using the given mean and standard deviation values.
+
+    Args:
+        tensor (torch.Tensor): The image tensor to be denormalized. Expected shape: (C, H, W).
+        mean (tuple, optional): Mean values for each channel. Default is (0.5, 0.5, 0.5).
+        std (tuple, optional): Standard deviation values for each channel. Default is (0.5, 0.5, 0.5).
+
+    Returns:
+        torch.Tensor: The denormalized image tensor, with values clipped to [0, 1].
+    """
+    # Goes from (C,) to (C, H, W)  which broadcasts over (C, H, W) in tensor 
+    # Each channel's pixels are denormalized according to their respective means and stds
+    mean_t = torch.tensor(mean, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
+    std_t = torch.tensor(std, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
+    return (tensor * std_t + mean_t).clamp(0, 1)

@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
         "./src"
-    ]
+    ],
+    "python.defaultInterpreterPath": "/Users/changminbark/Desktop/Bucknell/2026SS/CSCI357/.venv/bin/python3.12"
 }

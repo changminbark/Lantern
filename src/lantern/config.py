@@ -73,19 +73,14 @@ class MetricsConfig:
     """Configuration for training metrics tracking and reporting.
 
     Attributes:
-        task: torchmetrics task type. One of ``"binary"``, ``"multiclass"``,
-            ``"multilabel"``.
+        task: torchmetrics task type. One of ``"binary"``, ``"multiclass"``.
         names: Metric names to compute and log. Supported values: ``"loss"``,
             ``"accuracy"``, ``"f1"``, ``"precision"``, ``"recall"``.
             Defaults to ``["loss", "accuracy", "f1"]``.
-        num_classes: Number of output classes. Required when
-            ``task="multiclass"``; ignored for ``task="binary"``.
     """
 
     task: str = "multiclass"
     names: List[str] = field(default_factory=lambda: ["loss", "accuracy", "f1"])
-    num_classes: Optional[int] = None
-
 
 class ModelType(Enum):
     """Supported model architecture types."""
@@ -94,6 +89,7 @@ class ModelType(Enum):
     CNN = "cnn"
 
     def __str__(self) -> str:
+        """Return the string value of the enum member (e.g. ``"mlp"`` or ``"cnn"``)."""
         return self.value
 
 @dataclass
@@ -137,8 +133,14 @@ class ModelConfig:
 
     Attributes:
         model_type: Model architecture identifier (uses ModelType enum).
-        hidden_units: Number of neurons in each hidden layer.
-        dropout: Dropout rate after each hidden layer (aligned with hidden_units).
+            One of ``ModelType.MLP`` or ``ModelType.CNN``.
+        hidden_units: Number of neurons in each hidden layer (MLP only).
+        dropout: Dropout rate after each hidden layer, aligned with hidden_units (MLP only).
+        conv_blocks: List of ConvBlockConfig or ResidualBlockConfig instances
+            defining the convolutional layers (CNN only).
+        in_channels: Number of input channels. 1 for grayscale, 3 for RGB (CNN only).
+        use_GAP: If True, applies Global Average Pooling before the classifier
+            head instead of flattening (CNN only).
     """
 
     model_type: ModelType = ModelType.MLP
@@ -160,4 +162,39 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown model_type '{self.model_type}'. Must be one of {valid}"
                 )
+        self.conv_blocks = [_parse_conv_block(b) for b in self.conv_blocks]       
 
+def _parse_conv_block(raw_block: Union[ConvBlockConfig, ResidualBlockConfig, dict]):
+    """Parse a raw conv block dict or config object into a typed block config.
+
+    Args:
+        raw_block: A ConvBlockConfig/ResidualBlockConfig instance, or a dict
+            with a ``block_type`` key (``"conv"`` or ``"residual"``) and the
+            remaining fields matching the corresponding config dataclass.
+
+    Returns:
+        A ConvBlockConfig or ResidualBlockConfig instance.
+
+    Raises:
+        TypeError: If raw_block is neither a dict nor a block config object.
+        ValueError: If ``block_type`` is not ``"conv"`` or ``"residual"``.
+    """
+    # Already-parsed dataclass objects are allowed
+    if isinstance(raw_block, (ConvBlockConfig, ResidualBlockConfig)):
+        return raw_block
+
+    if not isinstance(raw_block, dict):
+        raise TypeError(
+            f"Each conv block must be a dict or block config object, got {type(raw_block)}"
+        )
+
+    block_data = dict(raw_block)  # copy so we can safely pop
+    block_type = block_data.pop("block_type", "conv")  # backward-compatible default
+
+    if block_type == "conv":
+        return ConvBlockConfig(**block_data)
+    if block_type == "residual":
+        return ResidualBlockConfig(**block_data)
+
+    raise ValueError(f"Unknown block_type '{block_type}' in conv_blocks")
+        

@@ -64,6 +64,11 @@ class MLP_Model(nn.Module):
         return total, trainable
 
     def get_architecture_config(self) -> Dict[str, Any]:
+        """Return a serializable dict describing the model architecture for checkpointing.
+
+        Returns:
+            A dict with keys ``model_type``, ``num_inputs``, ``num_outputs``, and ``config``.
+        """
         return {
             "model_type": self.config.model_type,
             "num_inputs": self.num_inputs,
@@ -101,6 +106,12 @@ class ResidualBlock(nn.Module):
         "Deep Residual Learning for Image Recognition." arXiv preprint arXiv:1512.03385 (2015).
     """
     def __init__(self, in_channels: int, res_config: ResidualBlockConfig):
+        """Build the residual and shortcut paths from the given config.
+
+        Args:
+            in_channels: Number of input feature maps.
+            res_config: Specifies out_channels and stride for the block.
+        """
         super().__init__()
         # Build the two-conv "residual path", and don't forget that no bias is 
         # necessary for the convolutions because batch norm has its own bias.
@@ -147,6 +158,14 @@ class ResidualBlock(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the residual block: res_path(x) + shortcut(x), then ReLU.
+
+        Args:
+            x: Input tensor of shape (batch, in_channels, H, W).
+
+        Returns:
+            Output tensor of shape (batch, out_channels, H', W').
+        """
         # 1. Pass x through conv1 -> bn1 -> relu
         # 2. Pass through conv2 -> bn2
         # 3. Add the shortcut(x)
@@ -173,6 +192,14 @@ class CNN_Model(nn.Module):
             num_outputs: int,
             config: ModelConfig
         ) -> None:
+        """Build the CNN feature extractor and classifier head from the given config.
+
+        Args:
+            input_height: Height of the input images in pixels.
+            input_width: Width of the input images in pixels.
+            num_outputs: Number of output classes/logits.
+            config: Specifies conv blocks, hidden units, dropout, and other settings.
+        """
         super().__init__()
 
         if config.model_type != ModelType.CNN:
@@ -247,6 +274,14 @@ class CNN_Model(nn.Module):
         self.classifier_head = nn.Sequential(*classifier_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Pass input through feature extractor, flatten or GAP, then classifier head.
+
+        Args:
+            x: Input tensor of shape (batch, in_channels, H, W).
+
+        Returns:
+            Logits tensor of shape (batch, num_outputs).
+        """
         # Pass x through self.feature_extractor, flatten/GAP, then self.classifier_head
         x = self.feature_extractor(x)
         # If GAP is enabled, apply global average pooling and squeeze spatial dimensions
@@ -260,11 +295,22 @@ class CNN_Model(nn.Module):
         return x
 
     def num_parameters(self) -> tuple[int, int]:
+        """Count total and trainable parameters in the model.
+
+        Returns:
+            A tuple of (total_parameters, trainable_parameters).
+        """
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return total_params, trainable_params
 
     def get_architecture_config(self) -> dict:
+        """Return a serializable dict describing the model architecture for checkpointing.
+
+        Returns:
+            A dict with keys ``model_type``, ``input_height``, ``input_width``,
+            ``num_outputs``, and ``config`` (with conv blocks tagged by ``block_type``).
+        """
         def _serialize_config() -> dict:
             config_dict = asdict(self.config)  # still use asdict for everything else
             config_dict['conv_blocks'] = [

@@ -8,7 +8,7 @@ Author: Chang Min Bark
 """
 
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,17 +34,51 @@ class TabularDataset(Dataset):
         feature_names: List[str],
         target_names: List[str],
     ) -> None:
+        """Store features and labels as tensors alongside metadata.
+
+        Args:
+            X: Feature matrix of shape (n_samples, n_features).
+            y: Integer class labels of shape (n_samples,).
+            feature_names: Column names for the input features.
+            target_names: Class label strings ordered by label index.
+        """
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.long)
         self.feature_names = feature_names
         self.target_names = target_names
 
     def __len__(self) -> int:
+        """Return the number of samples in the dataset."""
         return len(self.X)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the feature tensor and label for the sample at index ``idx``."""
         return self.X[idx], self.y[idx]
+    
+    def print_class_distribution(self) -> None:
+        """Print the sample count and percentage for each class."""
+        counts = torch.bincount(self.y, minlength=len(self.target_names))
+        total = len(self.y)
+        for i, name in enumerate(self.target_names):
+            pct = 100 * counts[i].item() / total
+            print(f"  {i} ({name}):  {counts[i].item()} samples ({pct:.1f}%)")
 
+    def get_class_weights(self) -> Tuple[Dict[str, float], torch.Tensor]:
+        """Return the class weights using the formula N_total / (N_classes * N_c).
+
+        Returns:
+            A (weights_dict, weights_tensor) tuple where weights_dict maps class
+            name to weight and weights_tensor is ordered by class index for use
+            with torch.nn.CrossEntropyLoss(weight=...).
+        """
+        counts = torch.bincount(self.y, minlength=len(self.target_names))
+        N_total = len(self.y)
+        N_classes = len(self.target_names)
+        weights = {}
+        for i, name in enumerate(self.target_names):
+            weights[name] = N_total / (N_classes * counts[i].item())
+        weight_tensor = torch.tensor([weights[name] for name in self.target_names])
+        return weights, weight_tensor
 
 def get_ucimlrepo_datasets(
     id: int,
@@ -181,7 +215,8 @@ _DATASET_REGISTRY = {
 def get_torchvision_datasets(
     name: str,
     root: str = "data",
-    transform: Optional[transforms.Compose] = None,
+    train_transform: Optional[transforms.Compose] = None,
+    test_transform: Optional[transforms.Compose] = None,
 ) -> Tuple[Dataset, Dataset]:
     """Load a torchvision dataset by name, returning train and test splits.
 
@@ -189,8 +224,11 @@ def get_torchvision_datasets(
         name: Dataset name. Supported values: 'mnist', 'fashion_mnist',
             'cifar10', 'cifar100'.
         root: Root directory where the dataset will be downloaded/cached.
-        transform: Optional transform applied to every sample. Defaults to
-            ``transforms.ToTensor()`` and ``transforms.Normalize((0.5,), (0.5,))`` when not provided.
+        train_transform: Optional transform applied to training samples. Defaults to
+            ``transforms.ToTensor()`` and ``transforms.Normalize((0.5,), (0.5,))``
+            when not provided.
+        test_transform: Optional transform applied to test samples. Defaults to
+            the same as ``train_transform`` when not provided.
 
     Returns:
         A (train_dataset, test_dataset) tuple.
@@ -203,15 +241,18 @@ def get_torchvision_datasets(
             f"Unknown dataset '{name}'. Supported: {list(_DATASET_REGISTRY.keys())}"
         )
 
-    if transform is None:
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,))
-        ])
+    default_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    if train_transform is None:
+        train_transform = default_transform
+    if test_transform is None:
+        test_transform = train_transform
 
     cls = _DATASET_REGISTRY[name]
-    train_dataset = cls(root=root, train=True, download=True, transform=transform)
-    test_dataset = cls(root=root, train=False, download=True, transform=transform)
+    train_dataset = cls(root=root, train=True, download=True, transform=train_transform)
+    test_dataset = cls(root=root, train=False, download=True, transform=test_transform)
     return train_dataset, test_dataset
 
 
