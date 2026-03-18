@@ -8,15 +8,56 @@ Author: Chang Min Bark
 """
 
 import os
-from typing import Dict, List, Optional, Tuple
+import re
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
+from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
+
+from lantern.text import build_vocab
+
+
+class TextDataset(Dataset):
+    """Dataset that stores tokenized text as integer sequences with labels.
+
+    Each sample is a ``(token_ids_tensor, label_tensor)`` pair where
+    ``token_ids_tensor`` is a 1D ``LongTensor`` of variable length and
+    ``label_tensor`` is a scalar ``LongTensor``.
+
+    Because sequences can have different lengths, collating a batch requires
+    padding. Use ``torch.nn.utils.rnn.pad_sequence`` (or a custom collate
+    function) when building a DataLoader from this dataset.
+
+    Attributes:
+        samples: List of ``(token_ids_tensor, label_tensor)`` tuples.
+    """
+
+    def __init__(self, token_id_sequences: list, labels: list):
+        """Store token-id sequences and labels as paired tensors.
+
+        Args:
+            token_id_sequences: Iterable of integer lists, one per sample,
+                where each integer is a vocabulary index.
+            labels: Iterable of integer class labels, one per sample.
+        """
+        self.samples = [
+            (torch.tensor(ids, dtype=torch.long), torch.tensor(lbl, dtype=torch.long))
+            for ids, lbl in zip(token_id_sequences, labels)
+        ]
+
+    def __len__(self) -> int:
+        """Return the number of samples in the dataset."""
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        """Return the (token_ids_tensor, label_tensor) pair at the given index."""
+        return self.samples[index]
 
 
 class TabularDataset(Dataset):
@@ -54,7 +95,7 @@ class TabularDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return the feature tensor and label for the sample at index ``idx``."""
         return self.X[idx], self.y[idx]
-    
+
     def print_class_distribution(self) -> None:
         """Print the sample count and percentage for each class."""
         counts = torch.bincount(self.y, minlength=len(self.target_names))
@@ -79,6 +120,51 @@ class TabularDataset(Dataset):
             weights[name] = N_total / (N_classes * counts[i].item())
         weight_tensor = torch.tensor([weights[name] for name in self.target_names])
         return weights, weight_tensor
+
+
+def get_dataloaders(
+    train_dataset: Dataset,
+    test_dataset: Dataset,
+    train_batch_size: int = 64,
+    eval_batch_size: int = 256,
+    num_workers: int = 2,
+    pin_memory: bool = True,
+    collate_fn: Callable = None,
+) -> Tuple[DataLoader, DataLoader]:
+    """Wrap datasets in DataLoaders.
+
+    Args:
+        train_dataset: Dataset for training (shuffled).
+        test_dataset: Dataset for evaluation (not shuffled).
+        train_batch_size: Batch size for the training loader.
+        eval_batch_size: Batch size for the evaluation loader.
+        num_workers: Number of subprocesses for data loading.
+        pin_memory: If True, pin tensors to page-locked memory for faster GPU transfer.
+        collate_fn: Optional callable to merge a list of samples into a batch. Useful
+            for datasets with variable-length sequences (e.g., padding with
+            ``torch.nn.utils.rnn.pad_sequence``). If None, the default collate is used.
+
+    Returns:
+        A (train_loader, test_loader) tuple.
+    """
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=train_batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=collate_fn,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=eval_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=collate_fn,
+    )
+    return train_loader, test_loader
+
 
 def get_ucimlrepo_datasets(
     id: int,
@@ -167,7 +253,9 @@ def get_kagglehub_datasets(
     else:
         csv_files = [f for f in os.listdir(path) if f.endswith(".csv")]
         if not csv_files:
-            raise FileNotFoundError(f"No CSV files found in downloaded dataset at {path}")
+            raise FileNotFoundError(
+                f"No CSV files found in downloaded dataset at {path}"
+            )
         csv_path = os.path.join(path, csv_files[0])
 
     df = pd.read_csv(csv_path)
@@ -241,10 +329,9 @@ def get_torchvision_datasets(
             f"Unknown dataset '{name}'. Supported: {list(_DATASET_REGISTRY.keys())}"
         )
 
-    default_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
+    default_transform = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
+    )
     if train_transform is None:
         train_transform = default_transform
     if test_transform is None:
@@ -256,27 +343,101 @@ def get_torchvision_datasets(
     return train_dataset, test_dataset
 
 
-def get_dataloaders(
-    train_dataset: Dataset,
-    test_dataset: Dataset,
-    train_batch_size: int = 64,
-    eval_batch_size: int = 256,
-    num_workers: int = 2,
-    pin_memory: bool = True,
-) -> Tuple[DataLoader, DataLoader]:
-    """Wrap datasets in DataLoaders.
+def get_hf_text_dataset(
+    dataset_name: str,
+    max_vocab_size: int = 25000,
+    min_freq: int = 2,
+    train_subset_fn: Optional[Callable] = None,
+    test_subset_fn: Optional[Callable] = None,
+) -> Tuple[TextDataset, TextDataset, Dict[str, int]]:
+    """Load a HuggingFace text dataset and return TextDatasets with a shared vocabulary.
+
+    Downloads the requested dataset via the HuggingFace ``datasets`` library,
+    builds a vocabulary from the training split using whitespace and punctuation removal tokenization
+    (lowercased and punctuation removed), and encodes both splits into integer-index sequences.
+
+    Supported Datasets
+    ------------------
+    "imdb"
+        The Large Movie Review Dataset for binary sentiment classification
+        (positive / negative). Contains 25,000 training reviews and 25,000
+        test reviews drawn from IMDB. Labels are 0 (negative) and 1 (positive).
+
+    "ag_news"
+        AG News Corpus for 4-class news topic classification. Contains 120,000
+        training articles and 7,600 test articles. Labels are 0 (World),
+        1 (Sports), 2 (Business), and 3 (Sci/Tech).
 
     Args:
-        train_dataset: Dataset for training (shuffled).
-        test_dataset: Dataset for evaluation (not shuffled).
-        train_batch_size: Batch size for the training loader.
-        eval_batch_size: Batch size for the evaluation loader.
-        num_workers: Number of subprocesses for data loading.
-        pin_memory: If True, pin tensors to page-locked memory for faster GPU transfer.
+        dataset_name: Identifier for which dataset to load.
+            Supported values: "imdb", "ag_news".
+        max_vocab_size: Maximum vocabulary size (excluding special tokens
+            ``<PAD>`` and ``<UNK>``). Defaults to 25000.
+        min_freq: Minimum word frequency required for a token to be included
+            in the vocabulary. Defaults to 2.
+        train_subset_fn: Optional callable applied to the raw HuggingFace train
+            split before tokenization (e.g., to subsample for faster experiments).
+        test_subset_fn: Optional callable applied to the raw HuggingFace test
+            split before tokenization.
 
     Returns:
-        A (train_loader, test_loader) tuple.
+        Tuple of (train_dataset, test_dataset, vocab):
+            train_dataset: TextDataset for the training split.
+            test_dataset: TextDataset for the test/evaluation split.
+            vocab: Word-to-index dictionary (includes ``<PAD>`` at 0 and
+                ``<UNK>`` at 1).
+
+    Raises:
+        ValueError: If dataset_name is unsupported.
     """
-    train_loader = DataLoader(train_dataset, batch_size=train_batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
-    return train_loader, test_loader
+    if dataset_name == "imdb":
+        hf_name = "imdb"
+        train_split = "train"
+        test_split = "test"
+        text_key = "text"
+        label_key = "label"
+    elif dataset_name == "ag_news":
+        hf_name = "ag_news"
+        train_split = "train"
+        test_split = "test"
+        text_key = "text"
+        label_key = "label"
+    else:
+        raise ValueError(
+            f"Unsupported dataset_name='{dataset_name}'. "
+            "Supported values: 'imdb', 'ag_news'."
+        )
+
+    ds = load_dataset(hf_name)
+    train_data = ds[train_split]
+    test_data = ds[test_split]
+
+    if train_subset_fn is not None:
+        train_data = train_subset_fn(train_data)
+    if test_subset_fn is not None:
+        test_data = test_subset_fn(test_data)
+
+    def tokenize(text):
+        text = text.lower()
+        # remove punctuation but keep letters, numbers, spaces and apostrophes
+        text = re.sub(r"[^\w\s\']", "", text)
+        return text.split()
+
+    train_tokens = [tokenize(sample[text_key]) for sample in train_data]
+    test_tokens = [tokenize(sample[text_key]) for sample in test_data]
+
+    vocab = build_vocab(train_tokens, max_vocab_size=max_vocab_size, min_freq=min_freq)
+
+    def encode(tokens, vocab):
+        return [vocab.get(t, vocab["<UNK>"]) for t in tokens]
+
+    train_ids = [encode(tokens, vocab) for tokens in train_tokens]
+    test_ids = [encode(tokens, vocab) for tokens in test_tokens]
+
+    train_labels = [sample[label_key] for sample in train_data]
+    test_labels = [sample[label_key] for sample in test_data]
+
+    train_dataset = TextDataset(train_ids, train_labels)
+    test_dataset = TextDataset(test_ids, test_labels)
+
+    return train_dataset, test_dataset, vocab

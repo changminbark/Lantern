@@ -5,16 +5,35 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lantern"  # <-- this is your importable package name. It needs to match the name of the folder you created under src/.
 version = "0.1.0"
-description = "Student project for CSCI 357 Coursework"
+description = "Deep Neural Network Training and Evaluation Engine"
 dependencies = [
-    "jupyter", "jupyterlab", "jupytext", "nbconvert", "ipython>=8.18.0", "ipykernel",
-    "numpy", "pandas", "matplotlib",
+    "jupyter",
+    "jupyterlab",
+    "jupytext",
+    "nbconvert",
+    "ipython>=8.18.0",
+    "ipykernel",
+    "numpy",
+    "pandas",
+    "matplotlib",
     "scipy==1.13.1",
-    "scikit-learn", "statsmodels",
-    "torch", "torchvision", "torchaudio", "torchmetrics",
-    "fastapi", "uvicorn", "gradio", "streamlit",
-    "wandb", "tqdm",
-    "kaggle", "kagglehub", "ucimlrepo"
+    "scikit-learn",
+    "statsmodels",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "torchmetrics",
+    "fastapi",
+    "uvicorn",
+    "gradio",
+    "streamlit",
+    "wandb",
+    "tqdm",
+    "kaggle",
+    "kagglehub",
+    "ucimlrepo",
+    "transformers>=5.3.0",
+    "datasets>=4.0.0",
 ]
 requires-python = ">=3.11,<3.13"
 

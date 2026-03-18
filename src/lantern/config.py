@@ -35,6 +35,16 @@ class TrainerConfig:
         checkpoint_last_filename: Filename for the most recent checkpoint.
         checkpoint_save_interval: Save a checkpoint every N epochs.
         checkpoint_best_filename: Filename for the best model checkpoint.
+        use_scheduler: Whether to enable a learning rate scheduler.
+        scheduler_type: Scheduler variant. One of ``"step"``, ``"exponential"``,
+            ``"cosine"``, ``"reduce_on_plateau"``.
+        scheduler_step_size: Epochs between LR drops (StepLR only).
+        scheduler_gamma: Multiplicative factor to reduce the learning rate.
+        scheduler_patience: Epochs without improvement before reducing LR
+            (ReduceLROnPlateau only).
+        scheduler_min_lr: Lower bound on the learning rate.
+        num_workers: Number of subprocesses for DataLoader data loading.
+        pin_memory: If True, DataLoader copies tensors into pinned memory before returning.
     """
 
     trainer_batch_size: int = 64
@@ -68,6 +78,7 @@ class TrainerConfig:
     num_workers: int = 2
     pin_memory: bool = True
 
+
 @dataclass
 class MetricsConfig:
     """Configuration for training metrics tracking and reporting.
@@ -82,15 +93,20 @@ class MetricsConfig:
     task: str = "multiclass"
     names: List[str] = field(default_factory=lambda: ["loss", "accuracy", "f1"])
 
+
 class ModelType(Enum):
     """Supported model architecture types."""
 
     MLP = "mlp"
     CNN = "cnn"
+    BOW = "bow"
+    TEXTCNN = "textcnn"
+    SKIPGRAM = "skipgram"
 
     def __str__(self) -> str:
-        """Return the string value of the enum member (e.g. ``"mlp"`` or ``"cnn"``)."""
+        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``)."""
         return self.value
+
 
 @dataclass
 class ConvBlockConfig:
@@ -102,30 +118,35 @@ class ConvBlockConfig:
         stride: Stride of the convolution.
         padding: Zero-padding added to both sides of the input.
         pool_size: Kernel size for MaxPool2d. Set to 0 to skip pooling.
+        batch_norm: If True, applies Batch Normalization after the convolution.
     """
+
     out_channels: int
     kernel_size: int = 3
     stride: int = 1
     padding: int = 1
     pool_size: int = 2
     batch_norm: bool = False
-    
+
+
 @dataclass
 class ResidualBlockConfig:
     """
-    Configuration for a single residual block. 
-    
+    Configuration for a single residual block.
+
     This configuration specifies the parameters used to construct a residual block within a convolutional neural network.
-    It determines the number of output channels (filters) and the stride for the convolution, enabling the creation 
-    of blocks that support skip connections and flexible downsampling, as used in deep residual networks. 
-    NOTE: Remember - pool_size is intentionally omitted - stride handles downsampling 
+    It determines the number of output channels (filters) and the stride for the convolution, enabling the creation
+    of blocks that support skip connections and flexible downsampling, as used in deep residual networks.
+    NOTE: Remember - pool_size is intentionally omitted - stride handles downsampling
 
     Attributes:
         out_channels: Number of filters (output feature maps) for this block
         stride: Stride of the convolution.
     """
+
     out_channels: int
     stride: int = 1
+
 
 @dataclass
 class ModelConfig:
@@ -133,24 +154,47 @@ class ModelConfig:
 
     Attributes:
         model_type: Model architecture identifier (uses ModelType enum).
-            One of ``ModelType.MLP`` or ``ModelType.CNN``.
+            One of ``ModelType.MLP``, ``ModelType.CNN``, ``ModelType.BOW``,
+            ``ModelType.TEXTCNN``, or ``ModelType.SKIPGRAM``.
         hidden_units: Number of neurons in each hidden layer (MLP only).
         dropout: Dropout rate after each hidden layer, aligned with hidden_units (MLP only).
         conv_blocks: List of ConvBlockConfig or ResidualBlockConfig instances
-            defining the convolutional layers (CNN only).
-        in_channels: Number of input channels. 1 for grayscale, 3 for RGB (CNN only).
+            defining the convolutional layers (2D-CNN only).
+        in_channels: Number of input channels. 1 for grayscale, 3 for RGB (2D-CNN only).
         use_GAP: If True, applies Global Average Pooling before the classifier
-            head instead of flattening (CNN only).
+            head instead of flattening (2D-CNN only).
+        filter_sizes: List of kernel sizes for parallel 1D convolutions
+            (TextCNN1D / 1D-CNN only).
+        num_filters: Number of filters per kernel size (TextCNN1D / 1D-CNN only).
+        vocab_size: Total number of tokens in the vocabulary, including special
+            tokens ``<PAD>`` and ``<UNK>`` (NLP only).
+        embedding_dim: Dimensionality of each token embedding vector (NLP only).
+        padding_idx: Vocabulary index of the ``<PAD>`` token; the corresponding
+            embedding row is kept at zero and receives no gradient (NLP only).
+        freeze_embeddings: If True, the embedding layer weights are frozen and
+            will not be updated during training (NLP only).
     """
 
     model_type: ModelType = ModelType.MLP
     hidden_units: List[int] = field(default_factory=lambda: [128, 64])
     dropout: List[float] = field(default_factory=lambda: [0.1, 0.2])
-    # CNN Fields
-    conv_blocks: List[Union[ConvBlockConfig, ResidualBlockConfig]] = field(default_factory=list)
-    in_channels: int = 1        # 1 for grayscale, 3 for RGB
-    # Global Average Pooling
-    use_GAP: bool = False
+    # 2D-CNN Fields
+    conv_blocks: List[Union[ConvBlockConfig, ResidualBlockConfig]] = field(
+        default_factory=list
+    )
+    in_channels: int = 1  # 1 for grayscale, 3 for RGB
+    use_GAP: bool = False  # Global Average Pooling
+    # 1D-CNN (Text) Fields
+    filter_sizes: List[int] = field(
+        default_factory=lambda: [3, 4, 5]
+    )  # sizes of filters to use in TextCNN1D model.
+    num_filters: int = 100  # the number of filters to use in TextCNN1D model
+
+    # NLP / Embedding Fields
+    vocab_size: int = 0
+    embedding_dim: int = 100
+    padding_idx: int = 0
+    freeze_embeddings: bool = False
 
     def __post_init__(self) -> None:
         """Convert model_type from string to ModelType enum if needed."""
@@ -162,7 +206,8 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown model_type '{self.model_type}'. Must be one of {valid}"
                 )
-        self.conv_blocks = [_parse_conv_block(b) for b in self.conv_blocks]       
+        self.conv_blocks = [_parse_conv_block(b) for b in self.conv_blocks]
+
 
 def _parse_conv_block(raw_block: Union[ConvBlockConfig, ResidualBlockConfig, dict]):
     """Parse a raw conv block dict or config object into a typed block config.
@@ -197,4 +242,3 @@ def _parse_conv_block(raw_block: Union[ConvBlockConfig, ResidualBlockConfig, dic
         return ResidualBlockConfig(**block_data)
 
     raise ValueError(f"Unknown block_type '{block_type}' in conv_blocks")
-        

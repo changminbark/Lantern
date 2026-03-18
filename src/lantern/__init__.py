@@ -1,4 +1,22 @@
-from lantern.config import ConvBlockConfig, MetricsConfig, ModelConfig, ModelType, TrainerConfig
+"""
+lantern
+
+Public API for the lantern training library used in CSCI 357 - AI and Neural Networks.
+
+Re-exports the most commonly used classes and functions from the sub-modules so
+that notebooks and scripts can do ``from lantern import Trainer, ModelConfig``, etc.
+
+Course: CSCI 357 - AI and Neural Networks
+Author: Chang Min Bark
+"""
+
+from lantern.config import (
+    ConvBlockConfig,
+    MetricsConfig,
+    ModelConfig,
+    ModelType,
+    TrainerConfig,
+)
 from lantern.data import get_dataloaders, get_torchvision_datasets
 from lantern.model import CNN_Model, MLP_Model
 from lantern.sweep import make_train_sweep, print_sweep_info, terminate_sweep

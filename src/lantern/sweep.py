@@ -8,7 +8,13 @@ import wandb
 from torch import nn
 from torch.utils.data import DataLoader
 
-from lantern.config import ConvBlockConfig, MetricsConfig, ModelConfig, ModelType, ResidualBlockConfig, TrainerConfig, _parse_conv_block
+from lantern.config import (
+    MetricsConfig,
+    ModelConfig,
+    ModelType,
+    TrainerConfig,
+    _parse_conv_block,
+)
 from lantern.trainer import Trainer
 from lantern.utils import build_model, make_optimizer
 
@@ -54,6 +60,7 @@ def make_train_sweep(
     wandb_name_prefix: Optional[str] = None,
     metrics_config_param: Optional[MetricsConfig] = None,
     class_weights: Optional[torch.Tensor] = None,
+    text_collate_fn: Optional[callable] = None,
 ) -> callable:
     """Create a training function for use with a W&B sweep agent.
 
@@ -66,6 +73,8 @@ def make_train_sweep(
         device: Torch device for training.
         input_spec: For MLP models, an int giving the flattened input size.
             For CNN models, a list/tuple of (height, width).
+            For NLP models (BOW, TextCNN, SkipGram), this argument is unused;
+            pass any value or ``None``.
         num_outputs: Number of output classes.
         wandb_entity_name: Optional W&B entity (user or team) name.
         checkpoint_resume: Bool of whether checkpointing is activated.
@@ -75,6 +84,7 @@ def make_train_sweep(
             weight (index 1) is passed as ``pos_weight`` to ``BCEWithLogitsLoss``; for
             multiclass tasks the full tensor is passed as ``weight`` to
             ``CrossEntropyLoss``.
+        text_collate_fn: Callable collate function for NLP models
 
     Returns:
         A no-arg function suitable for ``wandb.agent(sweep_id, function=...)``.
@@ -101,21 +111,46 @@ def make_train_sweep(
         # Read hyperparameters from wandb.config (reads every time this closure is called, kind of like a global object)
         config = wandb.config
         print(f"wandb.config: {config}")
-        
+
         # Model related config hyperparameters
         model_type = getattr(config, "model_type", default_model_config.model_type)
         hidden_units = getattr(
             config, "hidden_units", default_model_config.hidden_units
         )
         dropout = getattr(config, "dropout", default_model_config.dropout)
+
+        # CNN-related config hyperparameters
         use_GAP = getattr(config, "use_GAP", default_model_config.use_GAP)
-        
         raw_blocks = getattr(config, "conv_blocks", default_model_config.conv_blocks)
         conv_blocks = [_parse_conv_block(b) for b in raw_blocks]
         in_channels = getattr(config, "in_channels", default_model_config.in_channels)
         if model_type == ModelType.CNN and not conv_blocks:
             raise ValueError("CNN Config is missing conv_blocks")
-        
+
+        # TextCNN1D-related config hyperparameters
+        num_filters = getattr(
+            config, "num_filters", getattr(default_model_config, "num_filters", 100)
+        )
+        filter_sizes = getattr(
+            config,
+            "filter_sizes",
+            getattr(default_model_config, "filter_sizes", (3, 4, 5)),
+        )
+        if not isinstance(filter_sizes, tuple):
+            filter_sizes = tuple(filter_sizes)
+
+        # NLP / Embedding related config hyperparameters
+        vocab_size = getattr(config, "vocab_size", default_model_config.vocab_size)
+        embedding_dim = getattr(
+            config, "embedding_dim", default_model_config.embedding_dim
+        )
+        padding_idx = getattr(config, "padding_idx", default_model_config.padding_idx)
+        freeze_embeddings = getattr(
+            config, "freeze_embeddings", default_model_config.freeze_embeddings
+        )
+        if model_type == ModelType.BOW and not text_collate_fn:
+            raise ValueError("text_collate_fn missing for BOW model")
+
         # Trainer related config hyperparameters
         trainer_batch_size = getattr(
             config, "trainer_batch_size", default_trainer_config.trainer_batch_size
@@ -144,22 +179,42 @@ def make_train_sweep(
         scheduler_gamma = getattr(
             config, "scheduler_gamma", default_trainer_config.scheduler_gamma
         )
-        use_scheduler = getattr(config, "use_scheduler", "scheduler_gamma" in config.keys())
+        use_scheduler = getattr(
+            config, "use_scheduler", "scheduler_gamma" in config.keys()
+        )
 
         # Descriptive run name for the W&B dashboard
-        hidden_str = "x".join(map(str, hidden_units))
-        if wandb_name_prefix:
-            run.name = f"{wandb_name_prefix}_{model_type}_bs{trainer_batch_size}_lr{learning_rate}_h{hidden_str}"
+        if model_type == ModelType.BOW:
+            run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_vs{vocab_size}_ed{embedding_dim}_wd{weight_decay:.5f}"
+        elif model_type == ModelType.TEXTCNN:
+            filter_sizes_str = "-".join(map(str, filter_sizes))
+            run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_nf{num_filters}_fs{filter_sizes_str}_wd{weight_decay:.5f}"
         else:
-            run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate}_h{hidden_str}"
+            hidden_str = "x".join(map(str, hidden_units))
+            run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_h{hidden_str}_wd{weight_decay:.5f}_m{momentum:.2f}"
+        if wandb_name_prefix is not None:
+            run.name = f"{wandb_name_prefix}_{run.name}"
         print(f"Run name set to: {run.name}")
 
         # New DataLoaders per run (batch size varies across runs)
+        collate_fn = None
+        if model_type == ModelType.BOW or model_type == ModelType.TEXTCNN:
+            collate_fn = text_collate_fn
         train_loader = DataLoader(
-            train_dataset, batch_size=trainer_batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory
+            train_dataset,
+            batch_size=trainer_batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=collate_fn,
         )
         val_loader = DataLoader(
-            val_dataset, batch_size=evaluator_batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+            val_dataset,
+            batch_size=evaluator_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=collate_fn,
         )
 
         # Build configs from sweep hyperparameters
@@ -190,14 +245,23 @@ def make_train_sweep(
                 task=metric_task,
                 names=metric_names,
             )
-        
+
         model_config = ModelConfig(
             model_type=model_type,
             hidden_units=hidden_units,
             dropout=dropout,
+            # CNN parameters
             conv_blocks=conv_blocks,
             in_channels=in_channels,
             use_GAP=use_GAP,
+            # TextCNN1D parameters
+            num_filters=num_filters,
+            filter_sizes=filter_sizes,
+            # NLP / embedding parameters
+            vocab_size=vocab_size,
+            embedding_dim=embedding_dim,
+            padding_idx=padding_idx,
+            freeze_embeddings=freeze_embeddings,
         )
 
         # Build model, optimizer, and criterion
@@ -206,7 +270,9 @@ def make_train_sweep(
         )
         optimizer = make_optimizer(model.parameters(), trainer_config)
         if metrics_config.task == "binary":
-            pos_weight = class_weights[1].to(device) if class_weights is not None else None
+            pos_weight = (
+                class_weights[1].to(device) if class_weights is not None else None
+            )
             criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         else:
             weight = class_weights.to(device) if class_weights is not None else None

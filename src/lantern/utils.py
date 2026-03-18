@@ -13,16 +13,15 @@ Date: 2/16/2026
 
 import os
 from pathlib import Path
-from typing import Iterable, List, Optional, Union
+from typing import Iterable, Optional, Union
 
 import numpy as np
-
 import torch
 import torch.nn as nn
 from sklearn.metrics import confusion_matrix
 
 from lantern.config import ModelConfig, ModelType, TrainerConfig
-from lantern.model import CNN_Model, MLP_Model
+from lantern.model import BagOfEmbeddings, CNN_Model, MLP_Model, SkipGram, TextCNN1D
 
 
 def accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
@@ -41,12 +40,16 @@ def accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
     return correct / totals
 
 
-def build_model(input_spec: Union[int, tuple, list], num_outputs: int, config: ModelConfig) -> nn.Module:
+def build_model(
+    input_spec: Union[int, tuple, list], num_outputs: int, config: ModelConfig
+) -> nn.Module:
     """Factory function that constructs a model based on config.model_type.
 
     Args:
         input_spec: For MLP models, an int giving the flattened input size.
             For CNN models, a list/tuple of (height, width).
+            For BOW models, this argument is unused (vocab size and embedding
+            dim are read from ``config``); pass any value or ``None``.
         num_outputs: Number of output classes.
         config: Model architecture configuration.
 
@@ -65,23 +68,36 @@ def build_model(input_spec: Union[int, tuple, list], num_outputs: int, config: M
         if not isinstance(input_spec, (tuple, list)) or len(input_spec) != 2:
             raise ValueError("CNN requires input_spec as (height, width).")
         h, w = input_spec[0], input_spec[1]
-        return CNN_Model(input_height=h, input_width=w, num_outputs=num_outputs, config=config)
+        return CNN_Model(
+            input_height=h, input_width=w, num_outputs=num_outputs, config=config
+        )
+    elif config.model_type == ModelType.TEXTCNN:
+        return TextCNN1D(num_outputs=num_outputs, config=config)
+    elif config.model_type == ModelType.BOW:
+        return BagOfEmbeddings(num_outputs=num_outputs, config=config)
+    elif config.model_type == ModelType.SKIPGRAM:
+        return SkipGram(config=config)
     else:
-        raise ValueError(f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN'")
+        raise ValueError(
+            f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN', 'ModelType.TEXTCNN', 'ModelType.BOW', 'ModelType.SKIPGRAM'"
+        )
 
 
 def make_optimizer(
     params: Iterable[torch.nn.Parameter], config: TrainerConfig
 ) -> torch.optim.Optimizer:
-    """
-    Factory for optimizers.
+    """Factory for optimizers.
 
     Args:
-        params (Iterable[torch.nn.Parameter]): Parameters to optimize.
-        config (TrainerConfig): Configuration for the optimizer.
+        params: Model parameters to optimize.
+        config: Trainer configuration specifying optimizer name, learning rate,
+            weight decay, and momentum.
 
     Returns:
-        torch.optim.Optimizer: Configured optimizer instance.
+        Configured optimizer instance.
+
+    Raises:
+        ValueError: If config.optimizer_name is not 'sgd', 'momentum', or 'adam'.
     """
     if config.optimizer_name == "sgd":
         return torch.optim.SGD(
@@ -111,18 +127,20 @@ def load_model_from_checkpoint(
     determine the model type, then dispatches to the appropriate constructor.
 
     NOTE: This ONLY restores the model architecture and weights, not optimizer state or other metadata.
+    NOTE: Only ``ModelType.MLP`` and ``ModelType.CNN`` are currently supported.
+    TextCNN1D, BagOfEmbeddings, and SkipGram models cannot be restored with this function.
 
     Args:
-        checkpoint_path: Path to checkpoint file
-        device: Device to load onto (default: CPU)
+        checkpoint_path: Path to checkpoint file.
+        device: Device to load onto (default: CPU).
 
     Returns:
-        Reconstructed model with loaded weights
+        Reconstructed model with loaded weights.
 
     Raises:
-        ValueError: If model_type in checkpoint is unrecognized
-        FileNotFoundError: if the checkpoint file does not exist
-        KeyError: if the checkpoint is missing the model_architecture metadata
+        FileNotFoundError: If the checkpoint file does not exist.
+        KeyError: If the checkpoint is missing the model_architecture metadata.
+        ValueError: If model_type in checkpoint is not ``ModelType.MLP`` or ``ModelType.CNN``.
     """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
@@ -144,9 +162,9 @@ def load_model_from_checkpoint(
     if model_type == ModelType.MLP:
         config = ModelConfig(**architecture["config"])
         model = MLP_Model(
-            num_inputs=architecture["num_inputs"], 
-            num_outputs=architecture["num_outputs"], 
-            config=config
+            num_inputs=architecture["num_inputs"],
+            num_outputs=architecture["num_outputs"],
+            config=config,
         )
     elif model_type == ModelType.CNN:
         config = ModelConfig(**architecture["config"])
@@ -154,7 +172,7 @@ def load_model_from_checkpoint(
             input_height=architecture["input_height"],
             input_width=architecture["input_width"],
             num_outputs=architecture["num_outputs"],
-            config=config
+            config=config,
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -168,18 +186,21 @@ def load_model_from_checkpoint(
 def make_lr_scheduler(
     optimizer: torch.optim.Optimizer, config: TrainerConfig
 ) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
-    """
-    Factory for learning rate schedulers.
+    """Factory for learning rate schedulers.
 
     Args:
-        optimizer: The optimizer to schedule
-        config: Configuration containing scheduler settings
+        optimizer: The optimizer whose learning rate will be scheduled.
+        config: Trainer configuration containing scheduler settings (use_scheduler,
+            scheduler_type, scheduler_step_size, scheduler_gamma, scheduler_patience,
+            scheduler_min_lr).
 
     Returns:
-        Scheduler instance, or None if use_scheduler is False
+        Scheduler instance, or None if config.use_scheduler is False.
 
     Raises:
-        ValueError: If scheduler_type is unrecognized
+        ValueError: If config.scheduler_type is not ``'step'`` or
+            ``'reduce_on_plateau'``. (``'exponential'`` and ``'cosine'`` are
+            listed in TrainerConfig but are not yet implemented here.)
     """
     if not config.use_scheduler:
         return None
@@ -201,6 +222,7 @@ def make_lr_scheduler(
     # Add more schedulers as needed...
     else:
         raise ValueError(f"Unknown scheduler type: {config.scheduler_type}")
+
 
 def lr_range_test(
     model: nn.Module,
@@ -260,10 +282,10 @@ def lr_range_test(
 
     # Create a LambdaLR scheduler that multiplies the LR by gamma each step
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=lambda step: gamma ** step
+        optimizer, lr_lambda=lambda step: gamma**step
     )
 
-    lrs: list[float] = []     # Store the learning rates for each batch
+    lrs: list[float] = []  # Store the learning rates for each batch
     losses: list[float] = []  # Store the losses for each batch
     best_loss = float("inf")  # Track the smallest loss encountered
     loader_iter = iter(train_loader)  # Iterator for cycling through the train loader
@@ -307,6 +329,7 @@ def lr_range_test(
     # Return recorded learning rates and corresponding losses
     return lrs, losses
 
+
 def compute_confusion_matrix(
     model: nn.Module,
     data_loader: torch.utils.data.DataLoader,
@@ -323,9 +346,9 @@ def compute_confusion_matrix(
         Tuple of (confusion_matrix as numpy array, all_preds list, all_labels list)
     """
 
-    was_training = model.training                                                                                                                                                             
-    model.eval()                                                                                                                                                                              
-    model.to(device)                                                                                                                                                                        
+    was_training = model.training
+    model.eval()
+    model.to(device)
 
     all_preds = []
     all_labels = []
@@ -348,6 +371,7 @@ def compute_confusion_matrix(
 
     cm = confusion_matrix(all_labels, all_preds)
     return cm, all_preds, all_labels
+
 
 def compute_saliency_map(
     model: nn.Module,
@@ -405,24 +429,115 @@ def compute_saliency_map(
 
     return saliency.cpu().numpy(), target_class
 
+
 def denormalize_image(
-        tensor: torch.tensor, 
-        mean: Optional[tuple] =(0.5, 0.5, 0.5), 
-        std: Optional[tuple] = (0.5, 0.5, 0.5),
-    ):
-    """
-    Denormalizes a tensor image using the given mean and standard deviation values.
+    tensor: torch.Tensor,
+    mean: Optional[tuple] = (0.5, 0.5, 0.5),
+    std: Optional[tuple] = (0.5, 0.5, 0.5),
+) -> torch.Tensor:
+    """Denormalize a tensor image using the given mean and standard deviation.
+
+    Reverses a channel-wise normalization transform: output = tensor * std + mean,
+    then clamps to [0, 1].
 
     Args:
-        tensor (torch.Tensor): The image tensor to be denormalized. Expected shape: (C, H, W).
-        mean (tuple, optional): Mean values for each channel. Default is (0.5, 0.5, 0.5).
-        std (tuple, optional): Standard deviation values for each channel. Default is (0.5, 0.5, 0.5).
+        tensor: Image tensor of shape (C, H, W).
+        mean: Per-channel mean used during the original normalization. Default: (0.5, 0.5, 0.5).
+        std: Per-channel std used during the original normalization. Default: (0.5, 0.5, 0.5).
 
     Returns:
-        torch.Tensor: The denormalized image tensor, with values clipped to [0, 1].
+        Denormalized image tensor of the same shape, with values clamped to [0, 1].
     """
-    # Goes from (C,) to (C, H, W)  which broadcasts over (C, H, W) in tensor 
+    # Goes from (C,) to (C, H, W)  which broadcasts over (C, H, W) in tensor
     # Each channel's pixels are denormalized according to their respective means and stds
     mean_t = torch.tensor(mean, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
     std_t = torch.tensor(std, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
     return (tensor * std_t + mean_t).clamp(0, 1)
+
+
+def get_text_saliency(
+    model: nn.Module,
+    token_ids: torch.Tensor,
+    target_class: int,
+    device: Optional[torch.device],
+) -> tuple[np.ndarray, torch.Tensor]:
+    """Compute per-token saliency as gradient magnitude w.r.t. the embedding output.
+
+    Backpropagates the score of target_class through the model and measures how
+    much each token's embedding contributes via its gradient L2 norm. Temporarily
+    enables grad on a frozen embedding weight so that gradients still flow for
+    visualization purposes.
+
+    NOTE: This function is specific to TextCNN1D models, as it directly accesses
+    model.embedding, model.convs, and model.classifier_head.
+
+    Args:
+        model: Trained TextCNN1D model (will be set to eval mode).
+        token_ids: 1-D token index tensor of shape (seq_len,). Do NOT include batch dim.
+        target_class: Class index to compute saliency for.
+        device: Device for computation. If None, infers from model parameters.
+
+    Returns:
+        Tuple of (saliency as a 1-D numpy array of shape (seq_len,) with L2 gradient
+        norms per token, logits tensor of shape (1, num_classes)).
+    """
+    if device is None:
+        device = next(model.parameters()).device
+
+    model.eval()
+    x = token_ids.unsqueeze(0).to(device)  # (1, seq_len)
+
+    # If embeddings are frozen, briefly unfreeze so gradients can flow
+    was_frozen = not model.embedding.weight.requires_grad
+    if was_frozen:
+        model.embedding.weight.requires_grad_(True)
+
+    try:
+        embedded = model.embedding(x)  # (1, seq_len, embed_dim)
+        embedded.retain_grad()
+
+        # Manually replay the TextCNN1D forward from the embedding output
+        emb_t = embedded.permute(0, 2, 1)  # (1, embed_dim, seq_len)
+        pooled = [torch.relu(conv(emb_t)).max(dim=2).values for conv in model.convs]
+        features = torch.cat(pooled, dim=1)
+        logits = model.classifier_head(features)
+
+        logits[0, target_class].backward()
+
+        grad = embedded.grad[0]  # (seq_len, embed_dim)
+        saliency = grad.norm(dim=1)  # (seq_len,)  — L2 norm over embed dim
+        return saliency.detach().cpu().numpy(), logits.detach().cpu()
+    finally:
+        if was_frozen:
+            model.embedding.weight.requires_grad_(False)
+
+
+def render_text_saliency_html(
+    words: list[str], saliency: np.ndarray, title: str = ""
+) -> str:
+    """Return an HTML string with words highlighted by saliency intensity.
+
+    Each word is wrapped in a <span> whose background opacity scales linearly
+    with its normalized saliency score (red channel, [0, 1]).
+
+    Args:
+        words: List of word strings corresponding to each token.
+        saliency: 1-D numpy array of raw saliency scores, one per token.
+            Will be normalized to [0, 1] internally.
+        title: Optional title displayed in bold above the highlighted text.
+
+    Returns:
+        HTML string containing a <p> block with inline-styled word spans.
+    """
+    s_min, s_max = saliency.min(), saliency.max()
+    norm = (saliency - s_min) / (s_max - s_min + 1e-8)  # normalise to [0, 1]
+
+    parts = [f'<p style="font-family:monospace; line-height:2;"><b>{title}</b><br>']
+    for word, alpha in zip(words, norm):
+        color = f"rgba(220, 50, 50, {float(alpha):.2f})"
+        parts.append(
+            f'<span style="background-color:{color}; padding:2px 4px; '
+            f'margin:1px; border-radius:3px;">{word}</span> '
+        )
+    parts.append("</p>")
+    return "".join(parts)

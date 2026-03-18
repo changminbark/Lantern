@@ -1,6 +1,15 @@
+"""
+trainer.py
+
+Training loop, checkpointing, and validation utilities for PyTorch models.
+
+Course: CSCI 357 - AI and Neural Networks
+Author: Chang Min Bark
+"""
+
 import os
 from dataclasses import asdict
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -9,7 +18,7 @@ import torchmetrics
 import wandb
 
 from lantern.config import MetricsConfig, TrainerConfig
-from lantern.utils import accuracy_from_logits, make_lr_scheduler
+from lantern.utils import make_lr_scheduler
 
 
 class Trainer:
@@ -23,6 +32,7 @@ class Trainer:
         config: TrainerConfig = TrainerConfig(),
         metrics_config: Optional[MetricsConfig] = None,
         run: Optional[wandb.Run] = None,
+        wandb_watch: bool = True,
     ) -> None:
         """Initialize the trainer with a model, optimizer, loss function, and optional W&B run.
 
@@ -34,6 +44,8 @@ class Trainer:
             metrics_config: Which metrics to compute and log. Defaults to
                 ``MetricsConfig()`` (loss, accuracy, and macro F1 for multiclass).
             run: Optional Weights & Biases run for experiment tracking.
+            wandb_watch: If True and a run is provided, calls ``wandb.watch``
+                on the model to log gradients and parameters.
         """
         self.model = model.to(config.device)
         self.optimizer = optimizer
@@ -41,8 +53,8 @@ class Trainer:
         self.config = config
         self.metrics_config = metrics_config or MetricsConfig()
         self.run = run
-        if self.run is not None:
-            wandb.watch(self.model, log="all", log_freq=1)
+        if self.run is not None and wandb_watch:
+            wandb.watch(self.model, log="all", log_freq=100)
         # Initialize learning rate scheduler if enabled
         self.scheduler = None
         if config.use_scheduler:
@@ -60,7 +72,7 @@ class Trainer:
         """Build fresh torchmetrics instances for the names in metrics_config."""
         cfg = self.metrics_config
         base_kwargs: Dict = {"task": cfg.task}
-        
+
         # If metrics task is multi class
         if cfg.task == "multiclass":
             if self.model.num_outputs is None:
@@ -68,7 +80,7 @@ class Trainer:
                     "self.model.num_outputs is required when task='multiclass'"
                 )
             base_kwargs["num_classes"] = self.model.num_outputs
-            
+
         # Keyword arguments for average metrics
         avg_kwargs = {} if cfg.task == "binary" else {"average": "macro"}
 
@@ -132,7 +144,9 @@ class Trainer:
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
-            preds = outputs.squeeze(-1) if self.metrics_config.task == "binary" else outputs
+            preds = (
+                outputs.squeeze(-1) if self.metrics_config.task == "binary" else outputs
+            )
             for m in tm_metrics.values():
                 m.update(preds, targets)
 
@@ -144,9 +158,7 @@ class Trainer:
             result[name] = m.compute().item()
         return result
 
-    def validate(
-        self, val_loader: torch.utils.data.DataLoader
-    ) -> Dict[str, float]:
+    def validate(self, val_loader: torch.utils.data.DataLoader) -> Dict[str, float]:
         """Evaluate the model on a validation set without updating parameters.
 
         Args:
@@ -177,7 +189,11 @@ class Trainer:
                 running_loss += loss.item() * batch_size
                 total_samples += batch_size
 
-                preds = logits.squeeze(-1) if self.metrics_config.task == "binary" else logits
+                preds = (
+                    logits.squeeze(-1)
+                    if self.metrics_config.task == "binary"
+                    else logits
+                )
                 for m in tm_metrics.values():
                     m.update(preds, y_batch)
 
@@ -268,7 +284,9 @@ class Trainer:
                 t_val = train_metrics.get(name, 0.0)
                 v_val = val_metrics.get(name, 0.0)
                 if name == "accuracy":
-                    parts.append(f"Train Accuracy={t_val * 100:.2f}%  Val Accuracy={v_val * 100:.2f}%")
+                    parts.append(
+                        f"Train Accuracy={t_val * 100:.2f}%  Val Accuracy={v_val * 100:.2f}%"
+                    )
                 else:
                     label = name.capitalize() if name != "loss" else "Loss"
                     parts.append(f"Train {label}={t_val:.4f}  Val {label}={v_val:.4f}")
