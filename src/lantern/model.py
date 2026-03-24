@@ -739,6 +739,381 @@ class SkipGram(nn.Module):
         return self.__str__()
 
 
+class RNNModel(nn.Module):
+    """Vanilla RNN (or LSTM or GRU) for regression or classification on continuous sequences.
+
+    This model processes sequence data (such as time series) using a recurrent neural network backbone (RNN, LSTM, or GRU),
+    followed by a fully connected classifier or regressor head. It does not perform embedding or tokenization and is assumed
+    to receive raw float inputs.
+
+    Architecture:
+        Input shape: (batch_size, seq_len, input_size)
+            └──> nn.RNN / nn.LSTM / nn.GRU → (batch_size, seq_len, num_directions * hidden_size)
+            └──> Final hidden state extraction → (batch_size, hidden_size * num_directions)
+            └──> Fully connected head → (batch_size, num_outputs)
+
+        Here ``num_directions`` is 1 for unidirectional and 2 for bidirectional RNNs (matching PyTorch).
+
+    Example:
+        >>> from lantern.config import ModelConfig
+        >>> config = ModelConfig(
+        ...     model_type="rnn",
+        ...     rnn_hidden_size=32,
+        ...     rnn_num_layers=2,
+        ...     bidirectional=True,
+        ...     rnn_type="lstm",
+        ...     hidden_units=[16],
+        ...     dropout=[0.1]
+        ... )
+        >>> model = RNNModel(input_size=8, num_outputs=3, config=config)
+        >>> x = torch.randn(4, 22, 8)  # batch of 4, sequence length 22, 8 features
+        >>> y = model(x)  # (4, 3)
+
+    Attributes:
+        input_size (int): Number of input features per time step (e.g., 1 for univariate).
+        num_outputs (int): Number of output values (1 for regression, C for classification).
+        config (ModelConfig): Configuration object.
+        rnn (nn.Module): The RNN/LSTM/GRU module.
+        classifier_head (nn.Sequential): Sequential fully connected head after the recurrent backbone.
+    """
+
+    def __init__(self, input_size: int, num_outputs: int, config: ModelConfig) -> None:
+        """Build the recurrent backbone and output head.
+
+        Args:
+            input_size: Number of input features per time step (e.g., ``1`` for a
+                univariate series).
+            num_outputs: Number of outputs (``1`` for regression, ``C`` for
+                ``C``-way classification).
+            config: Model configuration. Uses ``rnn_hidden_size``,
+                ``rnn_num_layers``, ``bidirectional``, ``rnn_type`` (``"rnn"``,
+                ``"lstm"``, or ``"gru"``), and ``hidden_units`` / ``dropout`` for
+                the fully connected head built by ``_construct_fc_layers``.
+
+        Raises:
+            ValueError: If ``config.model_type`` is not ``"rnn"``.
+            ValueError: If ``config.rnn_type`` is not one of ``"rnn"``, ``"lstm"``, or ``"gru"``.
+
+        """
+        super().__init__()
+
+        # Validate config.model_type is ModelType.RNN. If not, throw a ValueError
+        if config.model_type != ModelType.RNN:
+            raise ValueError("config.model_type is not set to `rnn`")
+
+        # Store self copies of parameters
+        self.config = config
+        self.input_size = input_size
+        self.num_outputs = num_outputs
+        self.rnn_hidden_size = config.rnn_hidden_size
+        self.rnn_num_layers = config.rnn_num_layers
+        self.bidirectional = config.bidirectional
+        self.rnn_type = config.rnn_type
+        self.clip_grad_norm = config.clip_grad_norm
+
+        # Determine if bidirectional is set, so you know how many directions your RNN will have.
+        num_directions = 2 if self.bidirectional else 1
+
+        # Build the recurrent backbone. Choose the correct nn module depending on rnn_type.
+        # Throws a ValueError if not "rnn", "lstm" or "gru"
+        if config.rnn_type == "lstm":
+            rnn_module = nn.LSTM
+        elif config.rnn_type == "gru":
+            rnn_module = nn.GRU
+        elif config.rnn_type == "rnn":
+            rnn_module = nn.RNN
+        else:
+            raise ValueError(
+                f"Invalid rnn_type: {config.rnn_type}. Supported: 'rnn', 'lstm', 'gru'."
+            )
+
+        # Instantiate your recurrent module ("self.rnn") using the chosen rnn_module. Make sure
+        #       to use input_size, hidden_size, num_layers, batch_first, and bidirectional from config.
+        self.rnn = rnn_module(
+            input_size=input_size,
+            hidden_size=self.rnn_hidden_size,
+            num_layers=self.rnn_num_layers,
+            bidirectional=self.bidirectional,
+            batch_first=True,
+        )
+
+        # The output head receives the concatenated final hidden state(s).
+        #       Its input dimension is hidden_size * num_directions.
+        head_input_size = config.rnn_hidden_size * num_directions
+
+        # Call _construct_fc_layers to create a classifier/regressor head after the RNN
+        self.classifier_head = _construct_fc_layers(
+            head_input_size, config, num_outputs
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode each sequence and apply the output head.
+
+        For LSTM, only the last hidden state ``h_n`` is used (not the cell state).
+        For bidirectional models, the last forward and backward states of the top
+        layer are concatenated before the head.
+
+        Args:
+            x: Float tensor of shape ``(batch, seq_len, input_size)``.
+
+        Returns:
+            Float tensor of shape ``(batch, num_outputs)``.
+        """
+        # Run through the recurrent backbone (RNN, LSTM, or GRU)
+        # All three return (output, hidden_state); we only need the hidden state.
+        _, hidden = self.rnn(x)
+
+        # Extract the last hidden state(s) depending on RNN type
+        if self.rnn_type == "lstm":
+            # LSTM hidden_state is a tuple (h_n, c_n); discard cell state
+            h_n, _ = hidden
+        else:
+            # GRU and vanilla RNN return h_n directly
+            h_n = hidden
+
+        # h_n shape: (num_layers * num_directions, batch, hidden_size)
+        if self.bidirectional:
+            # Forward final state: h_n[-2], Backward final state: h_n[-1]
+            # Both have shape (batch, hidden_size), so we cat along dim=1
+            final_state = torch.cat([h_n[-2], h_n[-1]], dim=1)
+        else:
+            # Use the last layer's final hidden state (shape: batch, hidden_size)
+            final_state = h_n[-1]
+
+        # Pass through classifier head
+        return self.classifier_head(final_state)
+
+    def num_parameters(self) -> tuple[int, int]:
+        """Count total and trainable parameters in this module and submodules.
+
+        Returns:
+            A tuple ``(total_params, trainable_params)`` where both counts are
+            non-negative integers.
+        """
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+    def get_architecture_config(self) -> dict:
+        """Return a JSON-serializable description of the architecture.
+
+        Returns:
+            A dictionary with keys:
+
+            * ``model_class``: The string ``"RNNModel"``.
+            * ``input_size``: Features per time step.
+            * ``num_outputs``: Size of the head output.
+            * ``config``: The full ``ModelConfig`` as a plain dict (via
+              ``dataclasses.asdict``).
+        """
+        return {
+            "model_class": "RNNModel",
+            "input_size": self.input_size,
+            "num_outputs": self.num_outputs,
+            "config": asdict(self.config),
+        }
+
+    def __str__(self) -> str:
+        """Return a short, human-readable summary of hyperparameters.
+
+        Returns:
+            A string listing ``rnn_type``, directionality (uni/bi), ``input_size``,
+            ``rnn_hidden_size``, ``rnn_num_layers``, and ``num_outputs``.
+        """
+        direction = "bi" if self.config.bidirectional else "uni"
+        return (
+            f"RNNModel(type={self.config.rnn_type}, {direction}, "
+            f"input={self.input_size}, hidden={self.config.rnn_hidden_size}, "
+            f"layers={self.config.rnn_num_layers}, out={self.num_outputs})"
+        )
+
+    def __repr__(self) -> str:
+        """Return the same string as :meth:`__str__` for notebook and debugger display.
+
+        Returns:
+            Identical to :meth:`__str__`.
+        """
+        return self.__str__()
+
+
+class TextRNNModel(nn.Module):
+    """RNN text classifier using an embedding layer and RNN backbone.
+
+    This model maps input token ID sequences to embeddings, processes them with an RNN or LSTM,
+    and classifies the resulting sequence representations. Handles variable-length padded sequences
+    by extracting the hidden state at the last non-padded token for each example in the batch.
+
+    Architecture:
+        Token IDs -> Embedding -> RNN -> Final Hidden State -> Classifier Head
+
+    Handles padded sequences by extracting the hidden state at the actual
+    (non-padded) last time step for each sequence in the batch.
+
+    Args:
+        num_outputs (int): Number of output classes.
+        config (ModelConfig): Configuration object containing model hyperparameters, including:
+            - vocab_size (int): Vocabulary size for the embedding layer.
+            - embedding_dim (int): Dimensionality of the embedding vectors.
+            - padding_idx (int): Token index used for padding.
+            - freeze_embeddings (bool): If True, the embedding weights are not updated during training.
+            - rnn_hidden_size (int): Hidden size of the RNN/LSTM.
+            - rnn_num_layers (int): Number of stacked RNN/LSTM layers.
+            - bidirectional (bool): If True, use a bidirectional RNN/LSTM.
+            - rnn_type (str): Type of RNN backbone ("rnn", "lstm", or "gru").
+            - hidden_units (list[int] or None): MLP head hidden layer sizes.
+            - dropout (list[float]): Dropout rates for the classifier head layers.
+    """
+
+    def __init__(self, num_outputs: int, config: ModelConfig):
+        super().__init__()
+
+        if config.model_type != ModelType.TEXTRNN:
+            raise ValueError(
+                f"Invalid model_type: {config.model_type}. Expected 'text_rnn'."
+            )
+
+        self.num_outputs = num_outputs
+        self.config = config
+
+        # Set up embedding layer (same as BoE), and freeze the embeddings if requested.
+        self.embedding = nn.Embedding(
+            num_embeddings=config.vocab_size,
+            embedding_dim=config.embedding_dim,
+            padding_idx=config.padding_idx,
+        )
+        if config.freeze_embeddings:
+            self.embedding.requires_grad_(False)
+
+        # Determine if bidirectional is set, so you know how many directions your RNN will have.
+        num_directions = 2 if config.bidirectional else 1
+
+        # Build the recurrent backbone. Choose the correct nn module depending on rnn_type.
+        # Throws a ValueError if not "rnn", "lstm" or "gru"
+        if config.rnn_type == "lstm":
+            rnn_module = nn.LSTM
+        elif config.rnn_type == "gru":
+            rnn_module = nn.GRU
+        elif config.rnn_type == "rnn":
+            rnn_module = nn.RNN
+        else:
+            raise ValueError(
+                f"Invalid rnn_type: {config.rnn_type}. Supported: 'rnn', 'lstm', 'gru'."
+            )
+
+        # Instantiate your recurrent module ("self.rnn") using embedding_dim as input_size
+        self.rnn = rnn_module(
+            input_size=config.embedding_dim,
+            hidden_size=config.rnn_hidden_size,
+            num_layers=config.rnn_num_layers,
+            bidirectional=config.bidirectional,
+            batch_first=True,
+        )
+
+        # The output head receives the concatenated final hidden state(s).
+        # Its input dimension is hidden_size * num_directions.
+        head_input_size = config.rnn_hidden_size * num_directions
+
+        # Call _construct_fc_layers to create a classifier/regressor head after the RNN
+        self.classifier_head = _construct_fc_layers(
+            head_input_size, config, num_outputs
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: LongTensor of token IDs, shape (batch, seq_len).
+
+        Returns:
+            Logit tensor of shape (batch, num_outputs).
+        """
+        # Compute the actual (non-padding) length of each sequence.
+        # Result shape: (batch,)
+        lengths = (x != self.config.padding_idx).sum(dim=1)
+
+        # Look up embeddings for each token ID.
+        # Result shape: (batch, seq_len, embedding_dim)
+        embedded = self.embedding(x)
+
+        # Run the embedded sequence through the RNN backbone.
+        # rnn_out shape: (batch, seq_len, hidden_size * num_directions)
+        rnn_out, _ = self.rnn(embedded)
+
+        # Build index tensors to select the last real token's hidden state.
+        # last_idx: subtract 1 from each length; clamp to 0 to guard against empty sequences.
+        last_idx = (lengths - 1).clamp(min=0)  # (batch,)
+        batch_idx = torch.arange(x.size(0), device=x.device)  # (batch,)
+
+        # Extract the final hidden state, handling bidirectionality.
+        # For bidirectional models, the two directions finish at DIFFERENT positions:
+        #   - Forward direction  → final state is at last_idx (last real token)
+        #   - Backward direction → final state is at position 0
+        if self.config.bidirectional:
+            hidden_size = self.config.rnn_hidden_size
+            fwd = rnn_out[batch_idx, last_idx, :hidden_size]  # (batch, hidden_size)
+            bwd = rnn_out[batch_idx, 0, hidden_size:]  # (batch, hidden_size)
+            final_hidden = torch.cat([fwd, bwd], dim=1)  # (batch, hidden_size*2)
+        else:
+            final_hidden = rnn_out[batch_idx, last_idx]  # (batch, hidden_size)
+
+        # Pass the final hidden state through the classifier head.
+        return self.classifier_head(final_hidden)
+
+    def num_parameters(self) -> tuple[int, int]:
+        """Count total and trainable parameters in this module and submodules.
+
+        Returns:
+            A tuple ``(total_params, trainable_params)`` where both counts are
+            non-negative integers.
+        """
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+    def get_architecture_config(self) -> dict:
+        """Return a JSON-serializable description of the architecture.
+
+        Returns:
+            A dictionary with keys:
+
+            * ``model_class``: The string ``"TextRNNModel"``.
+            * ``num_outputs``: Size of the head output.
+            * ``config``: The full ``ModelConfig`` as a plain dict (via
+              ``dataclasses.asdict``).
+        """
+        from dataclasses import asdict
+
+        return {
+            "model_class": "TextRNNModel",
+            "num_outputs": self.num_outputs,
+            "config": asdict(self.config),
+        }
+
+    def __str__(self) -> str:
+        """Return a short, human-readable summary of hyperparameters.
+
+        Returns:
+            A string listing ``rnn_type``, directionality (uni/bi), ``vocab_size``,
+            ``embedding_dim``, ``rnn_hidden_size``, ``rnn_num_layers``, and ``num_outputs``.
+        """
+        frozen = "frozen" if self.config.freeze_embeddings else "trainable"
+        direction = "bi" if self.config.bidirectional else "uni"
+        return (
+            f"TextRNNModel(type={self.config.rnn_type}, {direction}, "
+            f"vocab={self.config.vocab_size}, embed={self.config.embedding_dim} ({frozen}), "
+            f"hidden={self.config.rnn_hidden_size}, layers={self.config.rnn_num_layers}, "
+            f"out={self.num_outputs})"
+        )
+
+    def __repr__(self) -> str:
+        """Return the same string as :meth:`__str__` for notebook and debugger display.
+
+        Returns:
+            Identical to :meth:`__str__`.
+        """
+        return self.__str__()
+
+
 def _construct_fc_layers(
     start_layer_size: int, config: ModelConfig, num_outputs: int
 ) -> nn.Sequential:

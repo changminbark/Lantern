@@ -20,8 +20,22 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import confusion_matrix
 
-from lantern.config import ModelConfig, ModelType, TrainerConfig
-from lantern.model import BagOfEmbeddings, CNN_Model, MLP_Model, SkipGram, TextCNN1D
+from lantern.config import (
+    ConvBlockConfig,
+    ModelConfig,
+    ModelType,
+    ResidualBlockConfig,
+    TrainerConfig,
+)
+from lantern.model import (
+    BagOfEmbeddings,
+    CNN_Model,
+    MLP_Model,
+    RNNModel,
+    SkipGram,
+    TextCNN1D,
+    TextRNNModel,
+)
 
 
 def accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
@@ -77,6 +91,14 @@ def build_model(
         return BagOfEmbeddings(num_outputs=num_outputs, config=config)
     elif config.model_type == ModelType.SKIPGRAM:
         return SkipGram(config=config)
+    elif config.model_type == ModelType.RNN:
+        if not isinstance(input_spec, int) or input_spec <= 0:
+            raise ValueError(
+                "RNN requires input_spec as int > 0 (input_size = features per time step)."
+            )
+        return RNNModel(input_size=input_spec, num_outputs=num_outputs, config=config)
+    elif config.model_type == ModelType.TEXTRNN:
+        return TextRNNModel(num_outputs=num_outputs, config=config)
     else:
         raise ValueError(
             f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN', 'ModelType.TEXTCNN', 'ModelType.BOW', 'ModelType.SKIPGRAM'"
@@ -121,26 +143,29 @@ def make_optimizer(
 def load_model_from_checkpoint(
     checkpoint_path: Union[str, Path], device: torch.device = torch.device("cpu")
 ) -> nn.Module:
-    """Reconstructs any model from a checkpoint file.
+    """Reconstruct any supported model from a checkpoint file.
 
-    This factory function inspects the checkpoint's model_architecture to
-    determine the model type, then dispatches to the appropriate constructor.
+    This factory function inspects the checkpoint's ``model_architecture`` metadata
+    to determine the model type, then dispatches to the appropriate constructor.
+    Only model architecture and weights are restored — optimizer state and other
+    training metadata are not loaded.
 
-    NOTE: This ONLY restores the model architecture and weights, not optimizer state or other metadata.
-    NOTE: Only ``ModelType.MLP`` and ``ModelType.CNN`` are currently supported.
-    TextCNN1D, BagOfEmbeddings, and SkipGram models cannot be restored with this function.
+    Supported model types: ``ModelType.MLP``, ``ModelType.CNN``, ``ModelType.BOW``,
+    ``ModelType.TEXTCNN``, ``ModelType.RNN``. ``ModelType.SKIPGRAM`` is not supported.
 
     Args:
-        checkpoint_path: Path to checkpoint file.
-        device: Device to load onto (default: CPU).
+        checkpoint_path: Path to the ``.pt`` checkpoint file.
+        device: Device to map the checkpoint onto. Defaults to CPU.
 
     Returns:
-        Reconstructed model with loaded weights.
+        Reconstructed ``nn.Module`` with weights loaded and moved to ``device``.
 
     Raises:
         FileNotFoundError: If the checkpoint file does not exist.
-        KeyError: If the checkpoint is missing the model_architecture metadata.
-        ValueError: If model_type in checkpoint is not ``ModelType.MLP`` or ``ModelType.CNN``.
+        KeyError: If the checkpoint is missing ``model_architecture`` metadata or
+            ``model_architecture`` is missing a ``model_type`` key.
+        ValueError: If the model type cannot be determined from the checkpoint, or
+            if it is ``ModelType.SKIPGRAM`` (unsupported).
     """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
@@ -156,21 +181,59 @@ def load_model_from_checkpoint(
 
     if "model_type" not in architecture:
         raise KeyError("model_architecture metadata does not have model_type")
-    model_type = architecture["model_type"]
+    model_type = architecture.get("model_type")
+
+    if model_type is None:
+        model_class = architecture.get("model_class")
+        dict_class_to_type = {
+            "MLP_Model": ModelType.MLP,
+            "CNN_Model": ModelType.CNN,
+            "BagOfEmbeddings": ModelType.BOW,
+            "TextCNN1D": ModelType.TEXTCNN,
+            "RNNModel": ModelType.RNN,
+            "TextRNNModel": ModelType.TEXTRNN,
+        }
+        model_type = dict_class_to_type.get(model_class)
+
+    if model_type is None:
+        raise ValueError(
+            "Could not determine model type from checkpoint architecture metadata"
+        )
+
+    config = _rebuild_model_config(architecture["config"])
 
     # Reconstruct model from saved architecture config
     if model_type == ModelType.MLP:
-        config = ModelConfig(**architecture["config"])
         model = MLP_Model(
             num_inputs=architecture["num_inputs"],
             num_outputs=architecture["num_outputs"],
             config=config,
         )
     elif model_type == ModelType.CNN:
-        config = ModelConfig(**architecture["config"])
         model = CNN_Model(
             input_height=architecture["input_height"],
             input_width=architecture["input_width"],
+            num_outputs=architecture["num_outputs"],
+            config=config,
+        )
+    elif model_type == ModelType.BOW:
+        model = BagOfEmbeddings(
+            num_outputs=architecture["num_outputs"],
+            config=config,
+        )
+    elif model_type == ModelType.TEXTCNN:
+        model = TextCNN1D(
+            num_outputs=architecture["num_outputs"],
+            config=config,
+        )
+    elif model_type == ModelType.RNN:
+        model = RNNModel(
+            input_size=architecture["input_size"],
+            num_outputs=architecture["num_outputs"],
+            config=config,
+        )
+    elif model_type == ModelType.TEXTRNN:
+        model = TextRNNModel(
             num_outputs=architecture["num_outputs"],
             config=config,
         )
@@ -541,3 +604,35 @@ def render_text_saliency_html(
         )
     parts.append("</p>")
     return "".join(parts)
+
+
+def _rebuild_model_config(config_dict: dict) -> ModelConfig:
+    """Rehydrate a ``ModelConfig`` from a plain dictionary saved in a checkpoint.
+
+    ``dataclasses.asdict`` flattens nested dataclasses to dicts, so
+    ``ConvBlockConfig`` and ``ResidualBlockConfig`` entries inside
+    ``conv_blocks`` must be reconstructed before passing to ``ModelConfig``.
+
+    Args:
+        config_dict: Plain dictionary produced by ``dataclasses.asdict(model_config)``.
+
+    Returns:
+        A fully constructed ``ModelConfig`` instance.
+    """
+    cfg = dict(config_dict)
+
+    if "conv_blocks" in cfg and isinstance(cfg["conv_blocks"], list):
+        rebuilt_blocks = []
+        for block in cfg["conv_blocks"]:
+            if isinstance(block, dict):
+                block_type = block.get("block_type", "conv")
+                block_payload = {k: v for k, v in block.items() if k != "block_type"}
+                if block_type == "residual":
+                    rebuilt_blocks.append(ResidualBlockConfig(**block_payload))
+                else:
+                    rebuilt_blocks.append(ConvBlockConfig(**block_payload))
+            else:
+                rebuilt_blocks.append(block)
+        cfg["conv_blocks"] = rebuilt_blocks
+
+    return ModelConfig(**cfg)

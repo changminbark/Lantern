@@ -20,6 +20,18 @@ import wandb
 from lantern.config import MetricsConfig, TrainerConfig
 from lantern.utils import make_lr_scheduler
 
+# Registry mapping metric names to their torchmetrics classes.
+# Add or remove entries here to extend/restrict available metrics.
+METRICS_REGISTRY: Dict[str, type] = {
+    "accuracy": torchmetrics.Accuracy,
+    "f1": torchmetrics.F1Score,
+    "precision": torchmetrics.Precision,
+    "recall": torchmetrics.Recall,
+    "mae": torchmetrics.MeanAbsoluteError,
+    "mse": torchmetrics.MeanSquaredError,
+    "r2": torchmetrics.R2Score,
+}
+
 
 class Trainer:
     """A training loop wrapper that handles training, validation, and logging for PyTorch models."""
@@ -71,7 +83,11 @@ class Trainer:
     def _build_torchmetrics(self) -> Dict[str, torchmetrics.Metric]:
         """Build fresh torchmetrics instances for the names in metrics_config."""
         cfg = self.metrics_config
-        base_kwargs: Dict = {"task": cfg.task}
+
+        if cfg.task not in ["multiclass", "binary", "regression"]:
+            raise ValueError("Unsupported metrics task.")
+
+        base_kwargs: Dict = {} if cfg.task == "regression" else {"task": cfg.task}
 
         # If metrics task is multi class
         if cfg.task == "multiclass":
@@ -82,21 +98,15 @@ class Trainer:
             base_kwargs["num_classes"] = self.model.num_outputs
 
         # Keyword arguments for average metrics
-        avg_kwargs = {} if cfg.task == "binary" else {"average": "macro"}
-
-        # List of available metrics
-        name_to_cls = {
-            "accuracy": (torchmetrics.Accuracy, avg_kwargs),
-            "f1": (torchmetrics.F1Score, avg_kwargs),
-            "precision": (torchmetrics.Precision, avg_kwargs),
-            "recall": (torchmetrics.Recall, avg_kwargs),
-        }
+        avg_kwargs = (
+            {} if cfg.task in ["binary", "regression"] else {"average": "macro"}
+        )
 
         result: Dict[str, torchmetrics.Metric] = {}
         for name in cfg.names:
-            if name in name_to_cls:
-                cls, extra = name_to_cls[name]
-                result[name] = cls(**base_kwargs, **extra).to(self.config.device)
+            if name in METRICS_REGISTRY:
+                cls = METRICS_REGISTRY[name]
+                result[name] = cls(**base_kwargs, **avg_kwargs).to(self.config.device)
         return result
 
     def __enter__(self) -> "Trainer":
@@ -144,9 +154,13 @@ class Trainer:
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
-            preds = (
-                outputs.squeeze(-1) if self.metrics_config.task == "binary" else outputs
-            )
+            if self.metrics_config.task == "regression":
+                preds = outputs.squeeze(-1)
+                targets = targets.squeeze(-1)
+            elif self.metrics_config.task == "binary":
+                preds = outputs.squeeze(-1)
+            else:
+                preds = outputs
             for m in tm_metrics.values():
                 m.update(preds, targets)
 
@@ -189,11 +203,13 @@ class Trainer:
                 running_loss += loss.item() * batch_size
                 total_samples += batch_size
 
-                preds = (
-                    logits.squeeze(-1)
-                    if self.metrics_config.task == "binary"
-                    else logits
-                )
+                if self.metrics_config.task == "regression":
+                    preds = logits.squeeze(-1)
+                    y_batch = y_batch.squeeze(-1)
+                elif self.metrics_config.task == "binary":
+                    preds = logits.squeeze(-1)
+                else:
+                    preds = logits
                 for m in tm_metrics.values():
                     m.update(preds, y_batch)
 

@@ -122,22 +122,84 @@ class TabularDataset(Dataset):
         return weights, weight_tensor
 
 
+class TimeSeriesDataset(Dataset):
+    """A sliding-window Dataset for univariate or multivariate time series.
+
+    Each sample consists of a fixed-length input window ``x`` and a
+    forecast target ``y`` drawn from the first feature channel immediately
+    following that window.
+
+    Given a time series of length ``T``, the dataset contains
+    ``T - seq_len - forecast_horizon + 1`` non-overlapping-in-target windows.
+
+    Attributes:
+        data: Float32 tensor of shape ``(T, num_features)``.
+        seq_len: Number of time steps in each input window.
+        forecast_horizon: Number of future time steps to predict.
+    """
+
+    def __init__(self, data: np.ndarray, seq_len: int, forecast_horizon: int = 1):
+        """Store the time series and sliding-window parameters.
+
+        Args:
+            data: Array of shape ``(T,)`` or ``(T, num_features)``. 1-D arrays
+                are automatically reshaped to ``(T, 1)``.
+            seq_len: Number of past time steps used as model input.
+            forecast_horizon: Number of future time steps to predict from
+                feature channel 0. Defaults to 1.
+        """
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        self.data = torch.tensor(data, dtype=torch.float32)
+        self.seq_len = seq_len
+        self.forecast_horizon = forecast_horizon
+
+    def __len__(self) -> int:
+        """Return the number of sliding windows in the dataset."""
+        return len(self.data) - self.seq_len - self.forecast_horizon + 1
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the input window and forecast target at position ``idx``.
+
+        Args:
+            idx: Window start index in the range ``[0, len(self))``.
+
+        Returns:
+            A tuple ``(x, y)`` where:
+            - ``x`` is a Float32 tensor of shape ``(seq_len, num_features)``
+              containing the input window.
+            - ``y`` is a Float32 tensor of shape ``(forecast_horizon,)``
+              containing the target values from feature channel 0.
+        """
+        x = self.data[idx : idx + self.seq_len]  # (seq_len, num_features)
+        y = self.data[
+            idx + self.seq_len : idx + self.seq_len + self.forecast_horizon, 0
+        ]  # (forecast_horizon,)
+        return x, y
+
+
 def get_dataloaders(
     train_dataset: Dataset,
-    test_dataset: Dataset,
+    eval_dataset: Dataset = None,
+    test_dataset: Dataset = None,
     train_batch_size: int = 64,
     eval_batch_size: int = 256,
+    test_batch_size: int = 256,
     num_workers: int = 2,
     pin_memory: bool = True,
     collate_fn: Callable = None,
-) -> Tuple[DataLoader, DataLoader]:
+) -> Tuple[DataLoader, Optional[DataLoader], Optional[DataLoader]]:
     """Wrap datasets in DataLoaders.
 
     Args:
         train_dataset: Dataset for training (shuffled).
-        test_dataset: Dataset for evaluation (not shuffled).
+        eval_dataset: Optional validation/dev dataset (not shuffled). If None,
+            the second return value is None.
+        test_dataset: Optional test dataset (not shuffled). If None, the third
+            return value is None.
         train_batch_size: Batch size for the training loader.
-        eval_batch_size: Batch size for the evaluation loader.
+        eval_batch_size: Batch size for the eval loader.
+        test_batch_size: Batch size for the test loader.
         num_workers: Number of subprocesses for data loading.
         pin_memory: If True, pin tensors to page-locked memory for faster GPU transfer.
         collate_fn: Optional callable to merge a list of samples into a batch. Useful
@@ -145,7 +207,8 @@ def get_dataloaders(
             ``torch.nn.utils.rnn.pad_sequence``). If None, the default collate is used.
 
     Returns:
-        A (train_loader, test_loader) tuple.
+        A ``(train_loader, eval_loader, test_loader)`` tuple. ``eval_loader`` and
+        ``test_loader`` are ``None`` when the corresponding dataset is not provided.
     """
     train_loader = DataLoader(
         train_dataset,
@@ -155,19 +218,85 @@ def get_dataloaders(
         pin_memory=pin_memory,
         collate_fn=collate_fn,
     )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=eval_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
+    eval_loader = (
+        DataLoader(
+            eval_dataset,
+            batch_size=eval_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=collate_fn,
+        )
+        if eval_dataset is not None
+        else None
     )
-    return train_loader, test_loader
+    test_loader = (
+        DataLoader(
+            test_dataset,
+            batch_size=test_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=collate_fn,
+        )
+        if test_dataset is not None
+        else None
+    )
+    return train_loader, eval_loader, test_loader
+
+
+def get_ucimlrepo_np_arrays(
+    dataset_name: str,
+) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
+    """Fetch a UCI ML Repository dataset and return raw numpy arrays in chronological order.
+
+    Supported datasets
+    ------------------
+    "bike_sharing"
+        UCI Bike Sharing Dataset (ID 275). Hourly rental counts spanning two years
+        (17,379 records). Rows are sorted by ``dteday`` and ``hr`` to guarantee
+        chronological order. Leaky and non-numeric columns (``instant``, ``dteday``,
+        ``casual``, ``registered``) are dropped. The target is ``cnt`` (total hourly
+        rentals). Remaining columns are returned as features.
+
+    Args:
+        dataset_name: Name of the dataset. Supported: ``"bike_sharing"``.
+
+    Returns:
+        A ``(X, y, feature_names, target_names)`` tuple where:
+        - ``X`` is a float32 array of shape ``(n_samples, n_features)``.
+        - ``y`` is a float32 array of shape ``(n_samples,)`` containing the target.
+        - ``feature_names`` is a list of feature column name strings.
+        - ``target_names`` is a list of target column name strings.
+
+    Raises:
+        ValueError: If ``dataset_name`` is not supported.
+    """
+    from ucimlrepo import fetch_ucirepo
+
+    if dataset_name == "bike_sharing":
+        repo = fetch_ucirepo(id=275)
+        features: pd.DataFrame = repo.data.features
+        targets: pd.DataFrame = repo.data.targets
+        df = pd.concat([features, targets], axis=1)
+        df = df.sort_values(["dteday", "hr"]).reset_index(drop=True)
+        df = df.drop(
+            columns=["instant", "dteday", "casual", "registered"], errors="ignore"
+        )
+        y_raw = df.pop("cnt").values.astype(np.float32)
+        X = df.values.astype(np.float32)
+        feature_names: List[str] = df.columns.tolist()
+        target_names: List[str] = ["cnt"]
+        return X, y_raw, feature_names, target_names
+    else:
+        raise ValueError(
+            f"Unsupported dataset_name='{dataset_name}'. Supported: 'bike_sharing'."
+        )
 
 
 def get_ucimlrepo_datasets(
     id: int,
+    dataset_name: str = "",
     test_size: float = 0.2,
     random_state: int = 42,
 ) -> Tuple[TabularDataset, TabularDataset]:
@@ -184,6 +313,10 @@ def get_ucimlrepo_datasets(
         A (train_dataset, val_dataset) tuple of TabularDataset instances.
     """
     from ucimlrepo import fetch_ucirepo
+
+    # Continuous targets cannot be stratified
+    if id == 275 or dataset_name == "bike_sharing":
+        stratify = False
 
     repo = fetch_ucirepo(id=id)
     X: pd.DataFrame = repo.data.features
@@ -207,7 +340,7 @@ def get_ucimlrepo_datasets(
         y_vals,
         test_size=test_size,
         random_state=random_state,
-        stratify=y_vals,
+        stratify=y_vals if stratify else None,
     )
 
     scaler = StandardScaler()

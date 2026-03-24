@@ -84,28 +84,15 @@ class MetricsConfig:
     """Configuration for training metrics tracking and reporting.
 
     Attributes:
-        task: torchmetrics task type. One of ``"binary"``, ``"multiclass"``.
+        task: torchmetrics task type. One of ``"binary"``, ``"multiclass"``, ``"regression"``.
         names: Metric names to compute and log. Supported values: ``"loss"``,
-            ``"accuracy"``, ``"f1"``, ``"precision"``, ``"recall"``.
+            ``"accuracy"``, ``"f1"``, ``"precision"``, ``"recall"``,
+            ``"mae"``, ``"mse"``, ``"r2"``.
             Defaults to ``["loss", "accuracy", "f1"]``.
     """
 
     task: str = "multiclass"
     names: List[str] = field(default_factory=lambda: ["loss", "accuracy", "f1"])
-
-
-class ModelType(Enum):
-    """Supported model architecture types."""
-
-    MLP = "mlp"
-    CNN = "cnn"
-    BOW = "bow"
-    TEXTCNN = "textcnn"
-    SKIPGRAM = "skipgram"
-
-    def __str__(self) -> str:
-        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``)."""
-        return self.value
 
 
 @dataclass
@@ -148,6 +135,22 @@ class ResidualBlockConfig:
     stride: int = 1
 
 
+class ModelType(Enum):
+    """Supported model architecture types."""
+
+    MLP = "mlp"
+    CNN = "cnn"
+    BOW = "bow"
+    TEXTCNN = "textcnn"
+    SKIPGRAM = "skipgram"
+    RNN = "rnn"
+    TEXTRNN = "textrnn"
+
+    def __str__(self) -> str:
+        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``)."""
+        return self.value
+
+
 @dataclass
 class ModelConfig:
     """Architecture configuration for model construction.
@@ -155,7 +158,7 @@ class ModelConfig:
     Attributes:
         model_type: Model architecture identifier (uses ModelType enum).
             One of ``ModelType.MLP``, ``ModelType.CNN``, ``ModelType.BOW``,
-            ``ModelType.TEXTCNN``, or ``ModelType.SKIPGRAM``.
+            ``ModelType.TEXTCNN``, ``ModelType.SKIPGRAM``, or ``ModelType.RNN``.
         hidden_units: Number of neurons in each hidden layer (MLP only).
         dropout: Dropout rate after each hidden layer, aligned with hidden_units (MLP only).
         conv_blocks: List of ConvBlockConfig or ResidualBlockConfig instances
@@ -173,6 +176,15 @@ class ModelConfig:
             embedding row is kept at zero and receives no gradient (NLP only).
         freeze_embeddings: If True, the embedding layer weights are frozen and
             will not be updated during training (NLP only).
+        rnn_hidden_size: Number of features in the hidden state of each RNN layer (RNN only).
+        rnn_num_layers: Number of stacked recurrent layers (RNN only).
+        bidirectional: If True, use a bidirectional RNN; the hidden state at each
+            time step will be the concatenation of forward and backward states,
+            doubling the effective hidden size (RNN only).
+        rnn_type: Recurrent cell variant. One of ``"rnn"`` (vanilla),
+            ``"lstm"``, or ``"gru"`` (RNN only).
+        clip_grad_norm: Maximum L2 norm for gradient clipping applied after each
+            backward pass. Set to ``0.0`` to disable (RNN only).
     """
 
     model_type: ModelType = ModelType.MLP
@@ -195,6 +207,13 @@ class ModelConfig:
     embedding_dim: int = 100
     padding_idx: int = 0
     freeze_embeddings: bool = False
+
+    # RNN Fields
+    rnn_hidden_size: int = 64  # Hidden state dimensionality for RNN layers
+    rnn_num_layers: int = 1  # Number of stacked RNN layers
+    bidirectional: bool = False  # If True, use bidirectional RNN
+    rnn_type: str = "rnn"  # "rnn" for vanilla RNN, "lstm" for LSTM, "gru" for GRU
+    clip_grad_norm: float = 0.0  # Max gradient norm for clipping (0 = disabled)
 
     def __post_init__(self) -> None:
         """Convert model_type from string to ModelType enum if needed."""

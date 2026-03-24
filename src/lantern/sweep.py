@@ -73,6 +73,8 @@ def make_train_sweep(
         device: Torch device for training.
         input_spec: For MLP models, an int giving the flattened input size.
             For CNN models, a list/tuple of (height, width).
+            For RNN models, an int giving ``input_size`` (number of features per
+            time step, e.g. ``1`` for a univariate series).
             For NLP models (BOW, TextCNN, SkipGram), this argument is unused;
             pass any value or ``None``.
         num_outputs: Number of output classes.
@@ -151,6 +153,21 @@ def make_train_sweep(
         if model_type == ModelType.BOW and not text_collate_fn:
             raise ValueError("text_collate_fn missing for BOW model")
 
+        # RNN related config hyperparameters
+        rnn_hidden_size = getattr(
+            config, "rnn_hidden_size", default_model_config.rnn_hidden_size
+        )
+        rnn_num_layers = getattr(
+            config, "rnn_num_layers", default_model_config.rnn_num_layers
+        )
+        bidirectional = getattr(
+            config, "bidirectional", default_model_config.bidirectional
+        )
+        rnn_type = getattr(config, "rnn_type", default_model_config.rnn_type)
+        clip_grad_norm = getattr(
+            config, "clip_grad_norm", default_model_config.clip_grad_norm
+        )
+
         # Trainer related config hyperparameters
         trainer_batch_size = getattr(
             config, "trainer_batch_size", default_trainer_config.trainer_batch_size
@@ -182,6 +199,8 @@ def make_train_sweep(
         use_scheduler = getattr(
             config, "use_scheduler", "scheduler_gamma" in config.keys()
         )
+        # Choose loss by config ("mse" for regression, "cross_entropy" for classification).
+        loss_name = getattr(config, "loss_name", "cross_entropy")
 
         # Descriptive run name for the W&B dashboard
         if model_type == ModelType.BOW:
@@ -189,6 +208,12 @@ def make_train_sweep(
         elif model_type == ModelType.TEXTCNN:
             filter_sizes_str = "-".join(map(str, filter_sizes))
             run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_nf{num_filters}_fs{filter_sizes_str}_wd{weight_decay:.5f}"
+        elif model_type == ModelType.RNN:
+            run.name = (
+                f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
+                f"_hs{rnn_hidden_size}_L{rnn_num_layers}"
+                f"_bi{int(bidirectional)}_{rnn_type}_wd{weight_decay:.5f}"
+            )
         else:
             hidden_str = "x".join(map(str, hidden_units))
             run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_h{hidden_str}_wd{weight_decay:.5f}_m{momentum:.2f}"
@@ -262,6 +287,12 @@ def make_train_sweep(
             embedding_dim=embedding_dim,
             padding_idx=padding_idx,
             freeze_embeddings=freeze_embeddings,
+            # RNN support
+            rnn_hidden_size=rnn_hidden_size,
+            rnn_num_layers=rnn_num_layers,
+            bidirectional=bidirectional,
+            rnn_type=rnn_type,
+            clip_grad_norm=clip_grad_norm,
         )
 
         # Build model, optimizer, and criterion
@@ -275,8 +306,11 @@ def make_train_sweep(
             )
             criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         else:
-            weight = class_weights.to(device) if class_weights is not None else None
-            criterion = nn.CrossEntropyLoss(weight=weight)
+            if loss_name == "mse":
+                criterion = nn.MSELoss()
+            elif loss_name == "cross_entropy":
+                weight = class_weights.to(device) if class_weights is not None else None
+                criterion = nn.CrossEntropyLoss(weight=weight)
 
         # Train (pass run so Trainer logs to this W&B run)
         trainer = Trainer(
