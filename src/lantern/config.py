@@ -145,9 +145,10 @@ class ModelType(Enum):
     SKIPGRAM = "skipgram"
     RNN = "rnn"
     TEXTRNN = "textrnn"
+    SEQ2SEQ = "seq2seq"
 
     def __str__(self) -> str:
-        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``)."""
+        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``, ``"rnn"``, ``"textrnn"``, ``"seq2seq"``)."""
         return self.value
 
 

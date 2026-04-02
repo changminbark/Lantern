@@ -32,6 +32,7 @@ from lantern.model import (
     CNN_Model,
     MLP_Model,
     RNNModel,
+    Seq2SeqForecaster,
     SkipGram,
     TextCNN1D,
     TextRNNModel,
@@ -62,17 +63,22 @@ def build_model(
     Args:
         input_spec: For MLP models, an int giving the flattened input size.
             For CNN models, a list/tuple of (height, width).
-            For BOW models, this argument is unused (vocab size and embedding
-            dim are read from ``config``); pass any value or ``None``.
-        num_outputs: Number of output classes.
+            For RNN and SEQ2SEQ models, an int > 0 giving the number of features
+            per time step. For all other model types (TEXTCNN, BOW, SKIPGRAM,
+            TEXTRNN), this argument is unused; pass any value.
+        num_outputs: Number of output classes or, for SEQ2SEQ, the forecast
+            horizon (number of future steps to predict).
         config: Model architecture configuration.
 
     Returns:
         An instantiated nn.Module ready for training.
 
     Raises:
-        ValueError: If config.model_type is not recognized, or if input_spec
-            does not match the expected type for the chosen model.
+        ValueError: If ``config.model_type`` is not one of ``ModelType.MLP``,
+            ``ModelType.CNN``, ``ModelType.TEXTCNN``, ``ModelType.BOW``,
+            ``ModelType.SKIPGRAM``, ``ModelType.RNN``, ``ModelType.TEXTRNN``,
+            ``ModelType.SEQ2SEQ``, or if ``input_spec`` does not match the
+            expected type for the chosen model.
     """
     if config.model_type == ModelType.MLP:
         if not isinstance(input_spec, int):
@@ -99,9 +105,20 @@ def build_model(
         return RNNModel(input_size=input_spec, num_outputs=num_outputs, config=config)
     elif config.model_type == ModelType.TEXTRNN:
         return TextRNNModel(num_outputs=num_outputs, config=config)
+    elif config.model_type == ModelType.SEQ2SEQ:
+        if not isinstance(input_spec, int) or input_spec <= 0:
+            raise ValueError(
+                "SEQ2SEQ requires input_spec as int > 0 (input_size = features per time step)."
+            )
+        return Seq2SeqForecaster(
+            input_size=input_spec,
+            hidden_size=config.rnn_hidden_size,
+            num_layers=config.rnn_num_layers,
+            forecast_horizon=num_outputs,
+        )
     else:
         raise ValueError(
-            f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN', 'ModelType.TEXTCNN', 'ModelType.BOW', 'ModelType.SKIPGRAM'"
+            f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN', 'ModelType.TEXTCNN', 'ModelType.BOW', 'ModelType.SKIPGRAM', 'ModelType.RNN', 'ModelType.TEXTRNN', 'ModelType.SEQ2SEQ'"
         )
 
 

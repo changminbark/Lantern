@@ -1114,6 +1114,89 @@ class TextRNNModel(nn.Module):
         return self.__str__()
 
 
+class Seq2SeqForecaster(nn.Module):
+    """Encoder-decoder LSTM for multi-step time series forecasting.
+
+    The encoder reads a sequence of historical values and produces a final
+    hidden state. The decoder autoregressively generates future values,
+    feeding each prediction as the next input.
+
+    Args:
+        input_size: Number of features per time step (1 for univariate).
+        hidden_size: Hidden state dimensionality for both encoder and decoder.
+        num_layers: Number of stacked LSTM layers.
+        forecast_horizon: Number of future steps to predict.
+    """
+
+    def __init__(
+        self, input_size: int, hidden_size: int, num_layers: int, forecast_horizon: int
+    ):
+        super().__init__()
+        self.forecast_horizon = forecast_horizon
+        self.hidden_size = hidden_size
+        self.config = ModelConfig(
+            model_type=ModelType.RNN,
+            rnn_hidden_size=hidden_size,
+            rnn_num_layers=num_layers,
+            rnn_type="lstm",
+        )
+
+        # Create encoder LSTM (reads the input window)
+        self.encoder = nn.LSTM(
+            input_size=input_size,
+            hidden_size=self.config.rnn_hidden_size,
+            num_layers=self.config.rnn_num_layers,
+            bidirectional=self.config.bidirectional,
+            batch_first=True,
+        )
+
+        # Create decoder LSTM (generates predictions step by step)
+        self.decoder = nn.LSTM(
+            input_size=input_size,
+            hidden_size=self.config.rnn_hidden_size,
+            num_layers=self.config.rnn_num_layers,
+            bidirectional=self.config.bidirectional,
+            batch_first=True,
+        )
+
+        # Linear layer to map decoder hidden state to a single value
+        self.output_layer = _construct_fc_layers(
+            start_layer_size=hidden_size, config=self.config, num_outputs=1
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (batch, seq_len, input_size).
+
+        Returns:
+            Predictions of shape (batch, forecast_horizon).
+        """
+        # Encode the input sequence
+        _, (h, c) = self.encoder(x)
+
+        # Autoregressive decoding
+        # Start with the last known value as the first decoder input
+        decoder_input = x[:, -1:, :]  # (batch, 1, input_size)
+
+        predictions = []
+        for _ in range(self.forecast_horizon):
+            # One decoder step; initialize hidden state from encoder
+            output, (h, c) = self.decoder(
+                decoder_input, (h, c)
+            )  # output has size (batch, 1, hidden_size)
+
+            # Map to predicted value
+            pred = self.output_layer(output.squeeze(1))  # (batch, 1)
+            predictions.append(pred)
+
+            # Feed prediction back as next input
+            decoder_input = pred.unsqueeze(1)  # (batch, 1, input_size)
+
+        return torch.cat(predictions, dim=1)  # (batch, forecast_horizon)
+
+
 def _construct_fc_layers(
     start_layer_size: int, config: ModelConfig, num_outputs: int
 ) -> nn.Sequential:

@@ -116,6 +116,8 @@ def make_train_sweep(
 
         # Model related config hyperparameters
         model_type = getattr(config, "model_type", default_model_config.model_type)
+        if isinstance(model_type, str):
+            model_type = ModelType(model_type)
         hidden_units = getattr(
             config, "hidden_units", default_model_config.hidden_units
         )
@@ -210,9 +212,15 @@ def make_train_sweep(
             run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_nf{num_filters}_fs{filter_sizes_str}_wd{weight_decay:.5f}"
         elif model_type == ModelType.RNN:
             run.name = (
-                f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
+                f"{model_type}_{rnn_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
                 f"_hs{rnn_hidden_size}_L{rnn_num_layers}"
-                f"_bi{int(bidirectional)}_{rnn_type}_wd{weight_decay:.5f}"
+                f"_bi{int(bidirectional)}_wd{weight_decay:.5f}"
+            )
+        elif model_type == ModelType.TEXTRNN:
+            run.name = (
+                f"{model_type}_{rnn_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
+                f"_hs{rnn_hidden_size}_L{rnn_num_layers}"
+                f"_bi{int(bidirectional)}_wd{weight_decay:.5f}"
             )
         else:
             hidden_str = "x".join(map(str, hidden_units))
@@ -223,7 +231,7 @@ def make_train_sweep(
 
         # New DataLoaders per run (batch size varies across runs)
         collate_fn = None
-        if model_type == ModelType.BOW or model_type == ModelType.TEXTCNN:
+        if model_type in (ModelType.BOW, ModelType.TEXTCNN, ModelType.TEXTRNN):
             collate_fn = text_collate_fn
         train_loader = DataLoader(
             train_dataset,

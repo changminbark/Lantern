@@ -259,8 +259,16 @@ def get_ucimlrepo_np_arrays(
         ``casual``, ``registered``) are dropped. The target is ``cnt`` (total hourly
         rentals). Remaining columns are returned as features.
 
+    "appliances_energy"
+        UCI Appliances Energy Prediction Dataset (ID 374). Energy use in Wh of
+        appliances in a low-energy building, sampled every 10 minutes. Rows are
+        sorted chronologically by the ``date`` column, which is then dropped.
+        The primary target is the first target column (appliances energy in Wh).
+        Remaining columns are returned as features.
+
     Args:
-        dataset_name: Name of the dataset. Supported: ``"bike_sharing"``.
+        dataset_name: Name of the dataset. Supported: ``"bike_sharing"``,
+            ``"appliances_energy"``.
 
     Returns:
         A ``(X, y, feature_names, target_names)`` tuple where:
@@ -287,11 +295,29 @@ def get_ucimlrepo_np_arrays(
         X = df.values.astype(np.float32)
         feature_names: List[str] = df.columns.tolist()
         target_names: List[str] = ["cnt"]
-        return X, y_raw, feature_names, target_names
+    elif dataset_name == "appliances_energy":
+        np_data = fetch_ucirepo(id=374)
+        features_df = np_data.data.features.copy()
+        targets_df = np_data.data.targets.reset_index(drop=True)
+        features_df = features_df.reset_index(drop=True)
+        # Sort chronologically by date if present
+        if "date" in features_df.columns:
+            sort_idx = features_df["date"].argsort()
+            features_df = features_df.iloc[sort_idx].reset_index(drop=True)
+            targets_df = targets_df.iloc[sort_idx].reset_index(drop=True)
+            features_df = features_df.drop(columns=["date"])
+        # Primary target: first column (Appliances energy consumption in Wh)
+        target_col = targets_df.columns[0]
+        y_raw = targets_df[target_col].values.astype(np.float32)
+        feature_names = list(features_df.columns)
+        target_names = [target_col]
+        X = features_df.values.astype(np.float32)
     else:
         raise ValueError(
-            f"Unsupported dataset_name='{dataset_name}'. Supported: 'bike_sharing'."
+            f"Unsupported dataset_name='{dataset_name}'. Supported: 'bike_sharing', 'appliances_energy'."
         )
+
+    return X, y_raw, feature_names, target_names
 
 
 def get_ucimlrepo_datasets(
@@ -315,7 +341,7 @@ def get_ucimlrepo_datasets(
     from ucimlrepo import fetch_ucirepo
 
     # Continuous targets cannot be stratified
-    if id == 275 or dataset_name == "bike_sharing":
+    if id in (275, 374) or dataset_name in ("bike_sharing", "appliances_energy"):
         stratify = False
 
     repo = fetch_ucirepo(id=id)
