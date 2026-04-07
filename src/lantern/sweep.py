@@ -1,6 +1,7 @@
 """Utilities for managing Weights & Biases hyperparameter sweeps."""
 
 import os
+from functools import partial
 from typing import Optional, Union
 
 import torch
@@ -152,6 +153,7 @@ def make_train_sweep(
         freeze_embeddings = getattr(
             config, "freeze_embeddings", default_model_config.freeze_embeddings
         )
+        max_seq_len = getattr(config, "max_seq_len", default_model_config.max_seq_len)
         if model_type == ModelType.BOW and not text_collate_fn:
             raise ValueError("text_collate_fn missing for BOW model")
 
@@ -169,6 +171,9 @@ def make_train_sweep(
         clip_grad_norm = getattr(
             config, "clip_grad_norm", default_model_config.clip_grad_norm
         )
+
+        # AttentionClassifier related config hyperparameters
+        num_heads = getattr(config, "num_heads", default_model_config.num_heads)
 
         # Trainer related config hyperparameters
         trainer_batch_size = getattr(
@@ -222,6 +227,11 @@ def make_train_sweep(
                 f"_hs{rnn_hidden_size}_L{rnn_num_layers}"
                 f"_bi{int(bidirectional)}_wd{weight_decay:.5f}"
             )
+        elif model_type == ModelType.TEXTATTN:
+            run.name = (
+                f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
+                f"_ed{embedding_dim}_nh{num_heads}_wd{weight_decay:.5f}"
+            )
         else:
             hidden_str = "x".join(map(str, hidden_units))
             run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_h{hidden_str}_wd{weight_decay:.5f}_m{momentum:.2f}"
@@ -231,8 +241,15 @@ def make_train_sweep(
 
         # New DataLoaders per run (batch size varies across runs)
         collate_fn = None
-        if model_type in (ModelType.BOW, ModelType.TEXTCNN, ModelType.TEXTRNN):
-            collate_fn = text_collate_fn
+        if model_type in (
+            ModelType.BOW,
+            ModelType.TEXTCNN,
+            ModelType.TEXTRNN,
+            ModelType.TEXTATTN,
+        ):
+            collate_fn = partial(
+                text_collate_fn, max_seq_len=max_seq_len, padding_value=padding_idx
+            )
         train_loader = DataLoader(
             train_dataset,
             batch_size=trainer_batch_size,
@@ -295,12 +312,15 @@ def make_train_sweep(
             embedding_dim=embedding_dim,
             padding_idx=padding_idx,
             freeze_embeddings=freeze_embeddings,
+            max_seq_len=max_seq_len,
             # RNN support
             rnn_hidden_size=rnn_hidden_size,
             rnn_num_layers=rnn_num_layers,
             bidirectional=bidirectional,
             rnn_type=rnn_type,
             clip_grad_norm=clip_grad_norm,
+            # AttentionClassifier Support
+            num_heads=num_heads,
         )
 
         # Build model, optimizer, and criterion

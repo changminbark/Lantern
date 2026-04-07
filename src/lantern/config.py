@@ -146,6 +146,7 @@ class ModelType(Enum):
     RNN = "rnn"
     TEXTRNN = "textrnn"
     SEQ2SEQ = "seq2seq"
+    TEXTATTN = "textattn"
 
     def __str__(self) -> str:
         """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``, ``"rnn"``, ``"textrnn"``, ``"seq2seq"``)."""
@@ -159,7 +160,8 @@ class ModelConfig:
     Attributes:
         model_type: Model architecture identifier (uses ModelType enum).
             One of ``ModelType.MLP``, ``ModelType.CNN``, ``ModelType.BOW``,
-            ``ModelType.TEXTCNN``, ``ModelType.SKIPGRAM``, or ``ModelType.RNN``.
+            ``ModelType.TEXTCNN``, ``ModelType.SKIPGRAM``, ``ModelType.RNN``,
+            ``ModelType.TEXTRNN``, ``ModelType.SEQ2SEQ``, or ``ModelType.TEXTATTN``.
         hidden_units: Number of neurons in each hidden layer (MLP only).
         dropout: Dropout rate after each hidden layer, aligned with hidden_units (MLP only).
         conv_blocks: List of ConvBlockConfig or ResidualBlockConfig instances
@@ -186,17 +188,23 @@ class ModelConfig:
             ``"lstm"``, or ``"gru"`` (RNN only).
         clip_grad_norm: Maximum L2 norm for gradient clipping applied after each
             backward pass. Set to ``0.0`` to disable (RNN only).
+        num_heads: Number of attention heads (used by text_attn). Must satisfy
+            embed_dim % num_heads == 0.
+        max_seq_len: If set, input sequences are truncated to at most this many
+            tokens before processing. ``None`` disables truncation (NLP only).
     """
 
     model_type: ModelType = ModelType.MLP
     hidden_units: List[int] = field(default_factory=lambda: [128, 64])
     dropout: List[float] = field(default_factory=lambda: [0.1, 0.2])
+
     # 2D-CNN Fields
     conv_blocks: List[Union[ConvBlockConfig, ResidualBlockConfig]] = field(
         default_factory=list
     )
     in_channels: int = 1  # 1 for grayscale, 3 for RGB
     use_GAP: bool = False  # Global Average Pooling
+
     # 1D-CNN (Text) Fields
     filter_sizes: List[int] = field(
         default_factory=lambda: [3, 4, 5]
@@ -208,6 +216,10 @@ class ModelConfig:
     embedding_dim: int = 100
     padding_idx: int = 0
     freeze_embeddings: bool = False
+    # Critical for attention aheads -> O(batch * L^2)
+    max_seq_len: Optional[int] = (
+        None  # Truncate input sequences to at most this many tokens)
+    )
 
     # RNN Fields
     rnn_hidden_size: int = 64  # Hidden state dimensionality for RNN layers
@@ -215,6 +227,9 @@ class ModelConfig:
     bidirectional: bool = False  # If True, use bidirectional RNN
     rnn_type: str = "rnn"  # "rnn" for vanilla RNN, "lstm" for LSTM, "gru" for GRU
     clip_grad_norm: float = 0.0  # Max gradient norm for clipping (0 = disabled)
+
+    # Attention Fields
+    num_heads: int = 4
 
     def __post_init__(self) -> None:
         """Convert model_type from string to ModelType enum if needed."""

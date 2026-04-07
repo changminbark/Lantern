@@ -28,6 +28,7 @@ from lantern.config import (
     TrainerConfig,
 )
 from lantern.model import (
+    AttentionClassifier,
     BagOfEmbeddings,
     CNN_Model,
     MLP_Model,
@@ -65,7 +66,7 @@ def build_model(
             For CNN models, a list/tuple of (height, width).
             For RNN and SEQ2SEQ models, an int > 0 giving the number of features
             per time step. For all other model types (TEXTCNN, BOW, SKIPGRAM,
-            TEXTRNN), this argument is unused; pass any value.
+            TEXTRNN, TEXTATTN), this argument is unused; pass any value.
         num_outputs: Number of output classes or, for SEQ2SEQ, the forecast
             horizon (number of future steps to predict).
         config: Model architecture configuration.
@@ -116,6 +117,8 @@ def build_model(
             num_layers=config.rnn_num_layers,
             forecast_horizon=num_outputs,
         )
+    elif config.model_type == ModelType.TEXTATTN:
+        return AttentionClassifier(num_outputs=num_outputs, config=config)
     else:
         raise ValueError(
             f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN', 'ModelType.TEXTCNN', 'ModelType.BOW', 'ModelType.SKIPGRAM', 'ModelType.RNN', 'ModelType.TEXTRNN', 'ModelType.SEQ2SEQ'"
@@ -252,6 +255,11 @@ def load_model_from_checkpoint(
     elif model_type == ModelType.TEXTRNN:
         model = TextRNNModel(
             num_outputs=architecture["num_outputs"],
+            config=config,
+        )
+    elif model_type == ModelType.TEXTATTN:
+        model = AttentionClassifier(
+            num_outputs=architecture["num_ouputs"],
             config=config,
         )
     else:
@@ -621,6 +629,47 @@ def render_text_saliency_html(
         )
     parts.append("</p>")
     return "".join(parts)
+
+
+def extract_attention_weights(model, token_ids, vocab, device="cpu"):
+    """Extract attention weights from a trained AttentionClassifier.
+
+    Args:
+        model: Trained AttentionClassifier.
+        token_ids: 1D LongTensor of token IDs for a single example.
+        vocab: Plain dict mapping word → index (as returned by build_vocab).
+        device: Device to run inference on.
+
+    Returns:
+        pred_class (int): Predicted class index.
+        attn_weights (np.ndarray): Attention weights, shape (num_heads, seq_len, seq_len).
+        tokens (list[str]): Decoded token strings.
+    """
+    model.eval()
+    vocab_inv = {idx: token for token, idx in vocab.items()}
+
+    x = token_ids.unsqueeze(0).to(device)
+    padding_mask = x == model.config.padding_idx
+
+    with torch.no_grad():
+        embedded = model.embedding(x)
+        attn_out, attn_weights = model.attention(
+            embedded,
+            embedded,
+            embedded,
+            key_padding_mask=padding_mask,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        mask = (~padding_mask).unsqueeze(-1).float()
+        pooled = (attn_out * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+        logits = model.classifier_head(pooled)
+        pred_class = logits.argmax(dim=1).item()
+
+    attn_np = attn_weights.squeeze(0).cpu().numpy()
+    tokens = [vocab_inv.get(idx.item(), "<UNK>") for idx in token_ids]
+
+    return pred_class, attn_np, tokens
 
 
 def _rebuild_model_config(config_dict: dict) -> ModelConfig:

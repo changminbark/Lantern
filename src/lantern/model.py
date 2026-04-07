@@ -10,6 +10,7 @@ Course: CSCI 357 - AI and Neural Networks
 Author: Chang Min Bark
 """
 
+import math
 from dataclasses import asdict
 from typing import Any, Dict
 
@@ -260,7 +261,7 @@ class CNN_Model(nn.Module):
 
         self.feature_extractor = nn.Sequential(*conv_layers)
 
-        if config.use_GAP:
+        if self.config.use_GAP:
             self.gap = nn.AdaptiveAvgPool2d((1, 1))
             self._flat_features = current_in_channels
         else:
@@ -276,7 +277,9 @@ class CNN_Model(nn.Module):
 
         # --- Build the classifier head ---
         self.classifier_head = _construct_fc_layers(
-            start_layer_size=self._flat_features, config=config, num_outputs=num_outputs
+            start_layer_size=self._flat_features,
+            config=self.config,
+            num_outputs=num_outputs,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -427,13 +430,13 @@ class TextCNN1D(nn.Module):
         # Embedding table: maps each integer token ID to a dense vector of size embedding_dim.
         # padding_idx ensures the <PAD> row stays at zero and receives no gradient updates.
         self.embedding = nn.Embedding(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.embedding_dim,
-            padding_idx=config.padding_idx,
+            num_embeddings=self.config.vocab_size,
+            embedding_dim=self.config.embedding_dim,
+            padding_idx=self.config.padding_idx,
         )
 
         # Provide the option to freeze pretrained embeddings (e.g., GloVe)
-        if config.freeze_embeddings:
+        if self.config.freeze_embeddings:
             self.embedding.requires_grad_(False)
 
         # One Conv1d branch per filter size; each branch independently scans the sequence
@@ -441,18 +444,18 @@ class TextCNN1D(nn.Module):
         self.convs = nn.ModuleList(
             [
                 nn.Conv1d(
-                    in_channels=config.embedding_dim,
-                    out_channels=config.num_filters,
+                    in_channels=self.config.embedding_dim,
+                    out_channels=self.config.num_filters,
                     kernel_size=fs,
                 )
-                for fs in config.filter_sizes
+                for fs in self.config.filter_sizes
             ]
         )
 
         # Concatenated output of all branches feeds into the classifier head.
         self.classifier_head = _construct_fc_layers(
-            start_layer_size=config.num_filters * len(config.filter_sizes),
-            config=config,
+            start_layer_size=self.config.num_filters * len(self.config.filter_sizes),
+            config=self.config,
             num_outputs=num_outputs,
         )
 
@@ -586,22 +589,22 @@ class BagOfEmbeddings(nn.Module):
         #       PyTorch will automatically keep the padding_idx row as a zero vector
         #       and will not update it during backprop.
         self.embedding = nn.Embedding(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.embedding_dim,
-            padding_idx=config.padding_idx,
+            num_embeddings=self.config.vocab_size,
+            embedding_dim=self.config.embedding_dim,
+            padding_idx=self.config.padding_idx,
         )
 
         # If config.freeze_embeddings is True, prevent the embedding weights
         #       from receiving gradient updates by setting requires_grad = False.
         #       This is useful when you want to preserve pretrained GloVe knowledge
         #       and only train the classifier head (see Challenge 1).
-        if config.freeze_embeddings:
+        if self.config.freeze_embeddings:
             self.embedding.requires_grad_(False)
 
         # --- Classifier head: embedding_dim -> hidden_units -> num_outputs ---
         self.classifier_head = _construct_fc_layers(
-            start_layer_size=config.embedding_dim,
-            config=config,
+            start_layer_size=self.config.embedding_dim,
+            config=self.config,
             num_outputs=num_outputs,
         )
 
@@ -703,9 +706,9 @@ class SkipGram(nn.Module):
                 f"Invalid model_type: {config.model_type}. Expected 'ModelType.SKIPGRAM'."
             )
         self.config = config
-        self.num_outputs = config.vocab_size
-        self.embedding = nn.Embedding(config.vocab_size, config.embedding_dim)
-        self.linear = nn.Linear(config.embedding_dim, config.vocab_size)
+        self.num_outputs = self.config.vocab_size
+        self.embedding = nn.Embedding(self.config.vocab_size, self.config.embedding_dim)
+        self.linear = nn.Linear(self.config.embedding_dim, self.config.vocab_size)
 
     def forward(self, center_ids: torch.Tensor) -> torch.Tensor:
         """Embed center token IDs and project to vocabulary logits.
@@ -805,26 +808,26 @@ class RNNModel(nn.Module):
         self.config = config
         self.input_size = input_size
         self.num_outputs = num_outputs
-        self.rnn_hidden_size = config.rnn_hidden_size
-        self.rnn_num_layers = config.rnn_num_layers
-        self.bidirectional = config.bidirectional
-        self.rnn_type = config.rnn_type
-        self.clip_grad_norm = config.clip_grad_norm
+        self.rnn_hidden_size = self.config.rnn_hidden_size
+        self.rnn_num_layers = self.config.rnn_num_layers
+        self.bidirectional = self.config.bidirectional
+        self.rnn_type = self.config.rnn_type
+        self.clip_grad_norm = self.config.clip_grad_norm
 
         # Determine if bidirectional is set, so you know how many directions your RNN will have.
         num_directions = 2 if self.bidirectional else 1
 
         # Build the recurrent backbone. Choose the correct nn module depending on rnn_type.
         # Throws a ValueError if not "rnn", "lstm" or "gru"
-        if config.rnn_type == "lstm":
+        if self.config.rnn_type == "lstm":
             rnn_module = nn.LSTM
-        elif config.rnn_type == "gru":
+        elif self.config.rnn_type == "gru":
             rnn_module = nn.GRU
-        elif config.rnn_type == "rnn":
+        elif self.config.rnn_type == "rnn":
             rnn_module = nn.RNN
         else:
             raise ValueError(
-                f"Invalid rnn_type: {config.rnn_type}. Supported: 'rnn', 'lstm', 'gru'."
+                f"Invalid rnn_type: {self.config.rnn_type}. Supported: 'rnn', 'lstm', 'gru'."
             )
 
         # Instantiate your recurrent module ("self.rnn") using the chosen rnn_module. Make sure
@@ -839,11 +842,11 @@ class RNNModel(nn.Module):
 
         # The output head receives the concatenated final hidden state(s).
         #       Its input dimension is hidden_size * num_directions.
-        head_input_size = config.rnn_hidden_size * num_directions
+        head_input_size = self.config.rnn_hidden_size * num_directions
 
         # Call _construct_fc_layers to create a classifier/regressor head after the RNN
         self.classifier_head = _construct_fc_layers(
-            head_input_size, config, num_outputs
+            head_input_size, self.config, num_outputs
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -981,41 +984,41 @@ class TextRNNModel(nn.Module):
             embedding_dim=config.embedding_dim,
             padding_idx=config.padding_idx,
         )
-        if config.freeze_embeddings:
+        if self.config.freeze_embeddings:
             self.embedding.requires_grad_(False)
 
         # Determine if bidirectional is set, so you know how many directions your RNN will have.
-        num_directions = 2 if config.bidirectional else 1
+        num_directions = 2 if self.config.bidirectional else 1
 
         # Build the recurrent backbone. Choose the correct nn module depending on rnn_type.
         # Throws a ValueError if not "rnn", "lstm" or "gru"
-        if config.rnn_type == "lstm":
+        if self.config.rnn_type == "lstm":
             rnn_module = nn.LSTM
-        elif config.rnn_type == "gru":
+        elif self.config.rnn_type == "gru":
             rnn_module = nn.GRU
-        elif config.rnn_type == "rnn":
+        elif self.config.rnn_type == "rnn":
             rnn_module = nn.RNN
         else:
             raise ValueError(
-                f"Invalid rnn_type: {config.rnn_type}. Supported: 'rnn', 'lstm', 'gru'."
+                f"Invalid rnn_type: {self.config.rnn_type}. Supported: 'rnn', 'lstm', 'gru'."
             )
 
         # Instantiate your recurrent module ("self.rnn") using embedding_dim as input_size
         self.rnn = rnn_module(
-            input_size=config.embedding_dim,
-            hidden_size=config.rnn_hidden_size,
-            num_layers=config.rnn_num_layers,
-            bidirectional=config.bidirectional,
+            input_size=self.config.embedding_dim,
+            hidden_size=self.config.rnn_hidden_size,
+            num_layers=self.config.rnn_num_layers,
+            bidirectional=self.config.bidirectional,
             batch_first=True,
         )
 
         # The output head receives the concatenated final hidden state(s).
         # Its input dimension is hidden_size * num_directions.
-        head_input_size = config.rnn_hidden_size * num_directions
+        head_input_size = self.config.rnn_hidden_size * num_directions
 
         # Call _construct_fc_layers to create a classifier/regressor head after the RNN
         self.classifier_head = _construct_fc_layers(
-            head_input_size, config, num_outputs
+            head_input_size, self.config, num_outputs
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1123,23 +1126,22 @@ class Seq2SeqForecaster(nn.Module):
 
     Args:
         input_size: Number of features per time step (1 for univariate).
-        hidden_size: Hidden state dimensionality for both encoder and decoder.
-        num_layers: Number of stacked LSTM layers.
         forecast_horizon: Number of future steps to predict.
+        config: ModelConfig with model_type == ModelType.SEQ2SEQ.
+
+    Raises:
+        ValueError: If config.model_type is not ModelType.SEQ2SEQ.
     """
 
-    def __init__(
-        self, input_size: int, hidden_size: int, num_layers: int, forecast_horizon: int
-    ):
+    def __init__(self, input_size: int, forecast_horizon: int, config: ModelConfig):
         super().__init__()
+        if config.model_type != ModelType.SEQ2SEQ:
+            raise ValueError(
+                f"Invalid model_type: {config.model_type}. Expected 'ModelType.SEQ2SEQ'."
+            )
         self.forecast_horizon = forecast_horizon
-        self.hidden_size = hidden_size
-        self.config = ModelConfig(
-            model_type=ModelType.RNN,
-            rnn_hidden_size=hidden_size,
-            rnn_num_layers=num_layers,
-            rnn_type="lstm",
-        )
+        self.hidden_size = config.rnn_hidden_size
+        self.config = config
 
         # Create encoder LSTM (reads the input window)
         self.encoder = nn.LSTM(
@@ -1161,7 +1163,7 @@ class Seq2SeqForecaster(nn.Module):
 
         # Linear layer to map decoder hidden state to a single value
         self.output_layer = _construct_fc_layers(
-            start_layer_size=hidden_size, config=self.config, num_outputs=1
+            start_layer_size=self.hidden_size, config=self.config, num_outputs=1
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1197,6 +1199,132 @@ class Seq2SeqForecaster(nn.Module):
         return torch.cat(predictions, dim=1)  # (batch, forecast_horizon)
 
 
+class AttentionClassifier(nn.Module):
+    """Self-attention text classifier using nn.MultiheadAttention.
+
+    Architecture:
+        Token IDs -> Embedding -> MultiheadAttention (self-attention) ->
+        Masked Mean Pool -> Classifier Head
+
+    The model applies self-attention over the embedded token sequence, then
+    performs masked mean pooling (excluding padding tokens) to produce a
+    fixed-size document vector, which is passed through a fully connected
+    classifier head.
+
+    Args:
+        num_outputs (int): Number of output classes.
+        config (ModelConfig): Configuration containing:
+            vocab_size (int): Vocabulary size for the embedding layer.
+            embedding_dim (int): Dimensionality of each embedding vector.
+                Must satisfy embedding_dim % num_heads == 0.
+            padding_idx (int): Token index treated as padding.
+            freeze_embeddings (bool): If True, embedding weights are frozen.
+            num_heads (int): Number of attention heads.
+            dropout (list[float]): Dropout rates for the classifier head.
+            hidden_units (list[int]): Hidden layer sizes for the classifier head.
+    """
+
+    def __init__(self, num_outputs: int, config: ModelConfig):
+        super().__init__()
+
+        # Validate that config.model_type is "text_attn"
+        # Raise ValueError if it's not
+        if config.model_type != ModelType.TEXTATTN:
+            raise ValueError(
+                f"Invalid model_type: {config.model_type}. Expected 'text_attn'."
+            )
+
+        # Validate that embedding_dim is divisible by num_heads
+        # This is required by nn.MultiheadAttention
+        # Raise ValueError if the constraint is violated
+        if config.embedding_dim % config.num_heads != 0:
+            raise ValueError(
+                "Invalid embedding dimension and number of heads. Expected config.embedding_dim % config.num_heads == 0"
+            )
+
+        # Store num_outputs and config as instance attributes
+        self.num_outputs = num_outputs
+        self.config = config
+
+        # ── Embedding layer ──
+        # Create the embedding layer
+        # Use nn.Embedding with vocab_size, embedding_dim, and padding_idx from config
+        self.embedding = nn.Embedding(
+            num_embeddings=self.config.vocab_size,
+            embedding_dim=self.config.embedding_dim,
+            padding_idx=self.config.padding_idx,
+        )
+
+        # If config.freeze_embeddings is True, freeze the embedding weights
+        if self.config.freeze_embeddings:
+            self.embedding.weight.requires_grad = False
+
+        # ── Self-attention layer ──
+        # Create the self-attention layer using nn.MultiheadAttention
+        # - embed_dim should be config.embedding_dim
+        # - num_heads should be config.num_heads
+        # - batch_first should be True (so input/output shape is (batch, seq_len, embed_dim))
+        # - dropout should be config.dropout[0] if available, else 0.0
+        self.attention = nn.MultiheadAttention(
+            embed_dim=self.config.embedding_dim,
+            num_heads=self.config.num_heads,
+            dropout=self.config.dropout[0] if self.config.dropout else 0.0,
+            batch_first=True,
+        )
+
+        # ── Classifier head: embedding_dim -> hidden_units -> num_outputs ──
+        # =Create the classifier head using _construct_fc_layers
+        # - start_layer_size should be config.embedding_dim (output of pooling)
+        # - Pass config and num_outputs
+        self.classifier_head = _construct_fc_layers(
+            self.config.embedding_dim, self.config, num_outputs
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: LongTensor of token IDs, shape (batch, seq_len).
+
+        Returns:
+            Logit tensor of shape (batch, num_outputs).
+        """
+        # ── Step 1: Build the padding mask ──
+        # True where x IS padding (PyTorch convention: True = ignore)
+        padding_mask = x == self.config.padding_idx  # (batch, seq_len)
+
+        # ── Step 2: Embed tokens ──
+        embedded = self.embedding(x)
+
+        # ── Step 3: Self-attention ──
+        # For self-attention, query = key = value = embedded
+        # key_padding_mask tells attention to ignore padding positions
+        attn_out, _ = self.attention(
+            embedded, embedded, embedded, key_padding_mask=padding_mask
+        )  # attn_out: (batch, seq_len, embed_dim)
+
+        # ── Step 4: Masked mean pooling (exclude padding) ──
+        # Zero out padding positions so they don't contribute to the sum
+        mask = (~padding_mask).unsqueeze(-1).float()  # (batch, seq_len, 1)
+        attn_out = attn_out * mask
+
+        # Count real (non-padding) tokens per sequence
+        lengths = mask.sum(dim=1)  # (batch, 1)
+        lengths = lengths.clamp(min=1)  # avoid division by zero
+
+        # Sum over sequence dim and divide by real token count
+        pooled = attn_out.sum(dim=1) / lengths  # (batch, embed_dim)
+
+        # ── Step 5: Classifier head ──
+        return self.classifier_head(pooled)
+
+    def num_parameters(self) -> tuple:
+        """Return (total_params, trainable_params)."""
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+
 def _construct_fc_layers(
     start_layer_size: int, config: ModelConfig, num_outputs: int
 ) -> nn.Sequential:
@@ -1223,3 +1351,232 @@ def _construct_fc_layers(
         prev_size = hidden_size
     layers.append(nn.Linear(prev_size, num_outputs))
     return nn.Sequential(*layers)
+
+
+# ============================ EXPERIMENTAL ============================
+
+
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding from Vaswani et al. (2017).
+
+    Adds a deterministic position-dependent vector to each embedding. The encoding
+    is precomputed for up to max_len positions and stored as a non-learnable buffer.
+
+    Args:
+        embed_dim (int): Embedding dimension (must match the input).
+        max_len (int): Maximum sequence length to precompute encodings for.
+        dropout (float): Dropout rate applied after adding positional encoding.
+    """
+
+    def __init__(self, embed_dim, max_len=5000, dropout=0.1):
+        super().__init__()
+        pe = torch.zeros(max_len, embed_dim)  # (max_len, embed_dim)
+        pos = torch.arange(0, max_len).unsqueeze(1).float()  # (max_len, 1)
+
+        i = torch.arange(0, embed_dim, 2).float()
+        # a^b = exp(b * log(a))
+        div_term = torch.exp((-i / embed_dim) * math.log(10000.0))
+
+        pe[:, 0::2] = torch.sin(pos * div_term)  # even dims: sin
+        pe[:, 1::2] = torch.cos(pos * div_term)  # odd  dims: cos
+
+        self.register_buffer("pos_enc", pe.unsqueeze(0))  # (1, max_len, embed_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """Add positional encoding to input embeddings.
+
+        Args:
+            x: FloatTensor of shape (batch, seq_len, embed_dim).
+
+        Returns:
+            FloatTensor of same shape with positional encoding added.
+        """
+        # x: (batch, seq_len, embed_dim)
+        # Slice pos_enc to actual seq_len (x may be shorter than max_len)
+        x = x + self.pos_enc[:, : x.size(1), :]
+        return self.dropout(x)
+
+
+class AttentionClassifierWithPE(nn.Module):
+    """AttentionClassifier with sinusoidal positional encoding.
+
+    Architecture:
+        Token IDs -> Embedding -> PositionalEncoding -> MultiheadAttention ->
+        Masked Mean Pool -> Classifier Head
+
+    This is identical to the engine's AttentionClassifier except for the PE layer.
+
+    Args:
+        num_outputs (int): Number of output classes.
+        config (ModelConfig): Must have model_type="text_attn".
+    """
+
+    def __init__(self, num_outputs, config):
+        super().__init__()
+
+        # Validate that config.model_type is "text_attn"
+        # Raise ValueError if it's not
+        if config.model_type != ModelType.TEXTATTN:
+            raise ValueError(
+                f"Invalid model_type: {config.model_type}. Expected 'text_attn'."
+            )
+
+        # Validate that embedding_dim is divisible by num_heads
+        # This is required by nn.MultiheadAttention
+        # Raise ValueError if the constraint is violated
+        if config.embedding_dim % config.num_heads != 0:
+            raise ValueError(
+                "Invalid embedding dimension and number of heads. Expected config.embedding_dim % config.num_heads == 0"
+            )
+
+        # Store num_outputs and config as instance attributes
+        self.num_outputs = num_outputs
+        self.config = config
+
+        # ── Embedding layer ──
+        # Create the embedding layer
+        # Use nn.Embedding with vocab_size, embedding_dim, and padding_idx from config
+        self.embedding = nn.Embedding(
+            num_embeddings=self.config.vocab_size,
+            embedding_dim=self.config.embedding_dim,
+            padding_idx=self.config.padding_idx,
+        )
+
+        # If config.freeze_embeddings is True, freeze the embedding weights
+        if self.config.freeze_embeddings:
+            self.embedding.weight.requires_grad = False
+
+        # Positional Encoding layer
+        self.pos_enc = PositionalEncoding(
+            self.config.embedding_dim,
+            self.config.max_seq_len,
+            dropout=self.config.dropout[0] if self.config.dropout else 0.0,
+        )
+
+        # ── Self-attention layer ──
+        # Create the self-attention layer using nn.MultiheadAttention
+        # - embed_dim should be config.embedding_dim
+        # - num_heads should be config.num_heads
+        # - batch_first should be True (so input/output shape is (batch, seq_len, embed_dim))
+        # - dropout should be config.dropout[0] if available, else 0.0
+        self.attention = nn.MultiheadAttention(
+            embed_dim=self.config.embedding_dim,
+            num_heads=self.config.num_heads,
+            dropout=self.config.dropout[0] if self.config.dropout else 0.0,
+            batch_first=True,
+        )
+
+        # ── Classifier head: embedding_dim -> hidden_units -> num_outputs ──
+        # =Create the classifier head using _construct_fc_layers
+        # - start_layer_size should be config.embedding_dim (output of pooling)
+        # - Pass config and num_outputs
+        self.classifier_head = _construct_fc_layers(
+            self.config.embedding_dim, self.config, num_outputs
+        )
+
+    def forward(self, x):
+        """Forward pass with positional encoding."""
+        # ── Step 1: Build the padding mask ──
+        # True where x IS padding (PyTorch convention: True = ignore)
+        padding_mask = x == self.config.padding_idx  # (batch, seq_len)
+
+        # ── Step 2: Embed tokens ──
+        embedded = self.embedding(x)
+
+        # ── Step 3: Positional Encoding ──
+        embedded_pos_enc = self.pos_enc(embedded)
+
+        # ── Step 4: Self-attention ──
+        # For self-attention, query = key = value = embedded
+        # key_padding_mask tells attention to ignore padding positions
+        attn_out, _ = self.attention(
+            embedded_pos_enc,
+            embedded_pos_enc,
+            embedded_pos_enc,
+            key_padding_mask=padding_mask,
+        )  # attn_out: (batch, seq_len, embed_dim)
+
+        # ── Step 5: Masked mean pooling (exclude padding) ──
+        # Zero out padding positions so they don't contribute to the sum
+        mask = (~padding_mask).unsqueeze(-1).float()  # (batch, seq_len, 1)
+        attn_out = attn_out * mask
+
+        # Count real (non-padding) tokens per sequence
+        lengths = mask.sum(dim=1)  # (batch, 1)
+        lengths = lengths.clamp(min=1)  # avoid division by zero
+
+        # Sum over sequence dim and divide by real token count
+        pooled = attn_out.sum(dim=1) / lengths  # (batch, embed_dim)
+
+        # ── Step 5: Classifier head ──
+        return self.classifier_head(pooled)
+
+    def num_parameters(self):
+        """Return (total, trainable) parameter counts."""
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+
+class TimeSeriesAttentionClassifier(nn.Module):
+    """Self-attention classifier for multivariate time series.
+
+    Architecture:
+        Linear(num_features -> embed_dim) -> MultiheadAttention -> Mean Pool -> FC Head
+
+    Args:
+        num_features (int): Number of input features per timestep.
+        embed_dim (int): Dimension to project features into before attention.
+        num_heads (int): Number of attention heads.
+        num_outputs (int): Number of output classes.
+        hidden_dim (int): Hidden layer size in the FC head.
+        dropout (float): Dropout rate.
+    """
+
+    def __init__(
+        self,
+        num_features,
+        embed_dim=64,
+        num_heads=4,
+        num_outputs=2,
+        hidden_dim=32,
+        dropout=0.2,
+    ):
+        super().__init__()
+
+        self.num_outputs = num_outputs
+
+        self.linear_proj = nn.Linear(
+            in_features=num_features,
+            out_features=embed_dim,
+        )
+        self.mha = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.classifier_head = nn.Sequential(
+            nn.Linear(
+                in_features=embed_dim,
+                out_features=hidden_dim,
+            ),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_outputs),
+        )
+
+    def forward(self, x):
+        """Forward pass.
+
+        Args:
+            x: FloatTensor of shape (batch, seq_len, num_features).
+
+        Returns:
+            Logit tensor of shape (batch, num_outputs).
+        """
+
+        x = self.linear_proj(x)
+        x, _ = self.mha(x, x, x)
+        x = x.mean(dim=1)
+
+        return self.classifier_head(x)

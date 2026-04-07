@@ -11,7 +11,7 @@ import pathlib
 import urllib.request
 import zipfile
 from collections import Counter
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch.nn.functional import cosine_similarity
@@ -374,7 +374,9 @@ def analogy(glove: GloVeVocab, a: str, b: str, c: str, k: int = 5) -> None:
 
 
 def text_collate_fn(
-    batch: List[Tuple[torch.Tensor, torch.Tensor]], padding_value=0
+    batch: List[Tuple[torch.Tensor, torch.Tensor]],
+    padding_value: int = 0,
+    max_seq_len: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Collate function for variable-length text sequences.
 
@@ -383,16 +385,30 @@ def text_collate_fn(
 
     Args:
         batch: List of (token_ids_tensor, label_tensor) tuples from TextDataset.
-        padding_value: Integer index used to pad shorter sequences to the length
-            of the longest sequence in the batch. Defaults to 0 (``<PAD>`` index).
+        padding_value: Index used for padding (default 0, the PAD token).
+        max_seq_len: If set, each sequence is truncated to at most this many
+            tokens (first ``max_seq_len`` tokens are kept). Use this for
+            memory-heavy models such as self-attention, whose memory scales
+            as ``O(batch * L^2)`` in sequence length ``L``.
 
     Returns:
         Tuple of (padded_sequences, labels) where padded_sequences has shape
         (batch_size, max_seq_len) and labels has shape (batch_size,).
     """
     texts, labels = zip(*batch)
+
+    # If max_seq_len is specified, truncate each sequence to this maximum length.
+    if max_seq_len is not None:
+        texts = tuple(t[:max_seq_len] for t in texts)
+
+    # Pad sequences to the same length (that of the longest sequence in the batch),
+    # using padding_value (default is 0 for <PAD> token). Result is (batch_size, max_seq_len).
     padded_texts = pad_sequence(texts, batch_first=True, padding_value=padding_value)
+
+    # Stack the labels into a single tensor of shape (batch_size,).
     labels = torch.stack(labels)
+
+    # Return the padded text sequences and the labels as a tuple.
     return padded_texts, labels
 
 
