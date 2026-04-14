@@ -572,9 +572,9 @@ def get_hf_text_dataset(
     test_data = ds[test_split]
 
     if train_subset_fn is not None:
-        train_data = train_subset_fn(train_data)
+        train_data = train_subset_fn(train_data) or train_data
     if test_subset_fn is not None:
-        test_data = test_subset_fn(test_data)
+        test_data = test_subset_fn(test_data) or test_data
 
     def tokenize(text):
         text = text.lower()

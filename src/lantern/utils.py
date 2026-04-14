@@ -37,6 +37,7 @@ from lantern.model import (
     SkipGram,
     TextCNN1D,
     TextRNNModel,
+    TransformerClassifier,
 )
 
 
@@ -119,6 +120,8 @@ def build_model(
         )
     elif config.model_type == ModelType.TEXTATTN:
         return AttentionClassifier(num_outputs=num_outputs, config=config)
+    elif config.model_type == ModelType.TEXTTRANSFORMER:
+        return TransformerClassifier(num_outputs=num_outputs, config=config)
     else:
         raise ValueError(
             f"Unknown model type: {config.model_type}. Supported types: 'ModelType.MLP', 'ModelType.CNN', 'ModelType.TEXTCNN', 'ModelType.BOW', 'ModelType.SKIPGRAM', 'ModelType.RNN', 'ModelType.TEXTRNN', 'ModelType.SEQ2SEQ'"
@@ -259,6 +262,11 @@ def load_model_from_checkpoint(
         )
     elif model_type == ModelType.TEXTATTN:
         model = AttentionClassifier(
+            num_outputs=architecture["num_ouputs"],
+            config=config,
+        )
+    elif model_type == ModelType.TEXTTRANSFORMER:
+        model = TransformerClassifier(
             num_outputs=architecture["num_ouputs"],
             config=config,
         )

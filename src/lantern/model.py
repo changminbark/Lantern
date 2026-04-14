@@ -1325,6 +1325,204 @@ class AttentionClassifier(nn.Module):
         return total, trainable
 
 
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for transformer models.
+
+    Adds position-dependent sinusoidal signals to the input embeddings so that
+    the transformer can distinguish token positions despite self-attention being
+    permutation-invariant. Uses the formulation from Vaswani et al. (2017):
+        PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
+        PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+
+    The PE matrix is precomputed for positions 0..max_len-1 and registered as a
+    buffer (not a parameter) so it moves with the model to GPU but is not updated
+    by the optimizer.
+
+    Args:
+        d_model (int): Embedding / model dimension.
+        max_len (int): Maximum sequence length to precompute encodings for.
+        dropout (float): Dropout probability applied after adding PE.
+    """
+
+    def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # ── Precompute the sinusoidal PE matrix ──
+        pe = torch.zeros(max_len, d_model)  # (max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()  # (max_len, 1)
+
+        # Compute the division term: 10000^(2i/d_model) via log-space for numerical stability
+        i = torch.arange(0, d_model, 2).float()
+        # a^b = exp(b * log(a))
+        div_term = torch.exp((-i / d_model) * math.log(10000.0))  # (d_model/2,)
+
+        # Even indices: sin; odd indices: cos; (1, max_len, d_model) for broadcasting
+        pe[:, 0::2] = torch.sin(position * div_term)  # even indices: sin
+        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices: cos
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model) for broadcasting
+
+        # Register as buffer — moves with .to(device) but is not a trainable parameter
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add positional encoding to the input embeddings.
+
+        Args:
+            x: Tensor of shape (batch, seq_len, d_model).
+
+        Returns:
+            Tensor of same shape with positional encoding added and dropout applied.
+        """
+        x = x + self.pe[:, : x.size(1), :]  # slice PE to match actual seq_len
+        return self.dropout(x)
+
+
+class TransformerClassifier(nn.Module):
+    """Transformer encoder text classifier using PyTorch's built-in modules.
+
+    Architecture:
+        Token IDs -> Embedding (* sqrt(d_model)) -> PositionalEncoding ->
+        TransformerEncoder (N layers) -> Masked Mean Pool -> Classifier Head
+
+    Each TransformerEncoderLayer contains self-attention + FFN + residual + LayerNorm.
+    The model uses Pre-LN ordering (norm_first=True) for training stability.
+
+    Args:
+        num_outputs (int): Number of output classes.
+        config (ModelConfig): Configuration containing:
+            model_type (str): Must be "ModelType.TEXTTRANSFORMER".
+            vocab_size (int): Vocabulary size for the embedding layer.
+            embedding_dim (int): Model dimension (d_model). Must be divisible by num_heads.
+            padding_idx (int): Token index treated as padding.
+            freeze_embeddings (bool): If True, embedding weights are frozen.
+            num_heads (int): Number of attention heads per encoder layer.
+            num_encoder_layers (int): Number of stacked encoder layers (N).
+            dim_feedforward (int): Hidden dimension of the FFN sublayer.
+            dropout (list[float]): Dropout rates for the classifier head.
+            hidden_units (list[int]): Hidden layer sizes for the classifier head.
+    """
+
+    def __init__(self, num_outputs: int, config: ModelConfig):
+        super().__init__()
+
+        if config.model_type != ModelType.TEXTTRANSFORMER:
+            raise ValueError(
+                f"Invalid model_type: {config.model_type}. Expected 'ModelType.TEXTTRANSFORMER'."
+            )
+
+        # Confirm compatability of embedding dimension and number of heads
+        if config.embedding_dim % config.num_heads != 0:
+            raise ValueError(
+                f"embedding_dim ({config.embedding_dim}) must be divisible by "
+                f"num_heads ({config.num_heads})."
+            )
+
+        self.num_outputs = num_outputs
+        self.config = config
+        self.d_model = config.embedding_dim
+
+        # ── Embedding layer ──
+        self.embedding = nn.Embedding(
+            num_embeddings=self.config.vocab_size,
+            embedding_dim=self.config.embedding_dim,
+            padding_idx=self.config.padding_idx,
+        )
+        if self.config.freeze_embeddings:
+            self.embedding.weight.requires_grad = False
+
+        # ── Positional encoding ──
+        self.pos_encoder = PositionalEncoding(
+            d_model=self.config.embedding_dim,
+            max_len=self.config.max_seq_len,
+            dropout=self.config.dropout[0] if self.config.dropout else 0.1,
+        )
+
+        # ── Transformer encoder stack ──
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.config.embedding_dim,
+            nhead=self.config.num_heads,
+            dim_feedforward=self.config.dim_feedforward,
+            dropout=self.config.dropout[0] if self.config.dropout else 0.1,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+
+        # -- TransformerEncoder --
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=self.config.num_encoder_layers,
+            norm=nn.LayerNorm(self.config.embedding_dim),
+        )
+
+        # ── Classifier head ──
+        self.classifier_head = _construct_fc_layers(
+            start_layer_size=self.config.embedding_dim,
+            config=self.config,
+            num_outputs=self.num_outputs,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: LongTensor of token IDs, shape (batch, seq_len).
+
+        Returns:
+            Logit tensor of shape (batch, num_outputs).
+        """
+        # ── Build padding mask ──
+        # PyTorch convention: True = ignore this position
+        padding_mask = x == self.config.padding_idx  # (batch, seq_len)
+
+        # ── Embed + scale + positional encoding ──
+        embedded = self.embedding(x) * math.sqrt(self.d_model)
+        embedded = self.pos_encoder(embedded)
+
+        # ── Transformer encoder ──
+        # src_key_padding_mask has identical semantics to key_padding_mask from Week 11
+        encoder_out = self.transformer_encoder(
+            embedded, src_key_padding_mask=padding_mask
+        )
+
+        # ── Masked mean pooling ──
+        encoder_out = encoder_out.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+        lengths = (~padding_mask).sum(dim=1, keepdim=True).float().clamp(min=1)
+        pooled = encoder_out.sum(dim=1) / lengths  # (batch, d_model)
+
+        # ── Classifier head ──
+        return self.classifier_head(pooled)
+
+    def num_parameters(self) -> tuple:
+        """Return (total_params, trainable_params)."""
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+    def get_architecture_config(self) -> dict:
+        """Return a JSON-serializable description of the architecture."""
+        from dataclasses import asdict
+
+        return {
+            "model_class": "TransformerClassifier",
+            "num_outputs": self.num_outputs,
+            "config": asdict(self.config),
+        }
+
+    def __str__(self) -> str:
+        frozen = "frozen" if self.config.freeze_embeddings else "trainable"
+        return (
+            f"TransformerClassifier(vocab={self.config.vocab_size}, "
+            f"d_model={self.config.embedding_dim} ({frozen}), "
+            f"heads={self.config.num_heads}, layers={self.config.num_encoder_layers}, "
+            f"d_ff={self.config.dim_feedforward}, out={self.num_outputs})"
+        )
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+
 def _construct_fc_layers(
     start_layer_size: int, config: ModelConfig, num_outputs: int
 ) -> nn.Sequential:
@@ -1354,49 +1552,6 @@ def _construct_fc_layers(
 
 
 # ============================ EXPERIMENTAL ============================
-
-
-class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding from Vaswani et al. (2017).
-
-    Adds a deterministic position-dependent vector to each embedding. The encoding
-    is precomputed for up to max_len positions and stored as a non-learnable buffer.
-
-    Args:
-        embed_dim (int): Embedding dimension (must match the input).
-        max_len (int): Maximum sequence length to precompute encodings for.
-        dropout (float): Dropout rate applied after adding positional encoding.
-    """
-
-    def __init__(self, embed_dim, max_len=5000, dropout=0.1):
-        super().__init__()
-        pe = torch.zeros(max_len, embed_dim)  # (max_len, embed_dim)
-        pos = torch.arange(0, max_len).unsqueeze(1).float()  # (max_len, 1)
-
-        i = torch.arange(0, embed_dim, 2).float()
-        # a^b = exp(b * log(a))
-        div_term = torch.exp((-i / embed_dim) * math.log(10000.0))
-
-        pe[:, 0::2] = torch.sin(pos * div_term)  # even dims: sin
-        pe[:, 1::2] = torch.cos(pos * div_term)  # odd  dims: cos
-
-        self.register_buffer("pos_enc", pe.unsqueeze(0))  # (1, max_len, embed_dim)
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        """Add positional encoding to input embeddings.
-
-        Args:
-            x: FloatTensor of shape (batch, seq_len, embed_dim).
-
-        Returns:
-            FloatTensor of same shape with positional encoding added.
-        """
-        # x: (batch, seq_len, embed_dim)
-        # Slice pos_enc to actual seq_len (x may be shorter than max_len)
-        x = x + self.pos_enc[:, : x.size(1), :]
-        return self.dropout(x)
 
 
 class AttentionClassifierWithPE(nn.Module):

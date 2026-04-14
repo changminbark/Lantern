@@ -76,8 +76,8 @@ def make_train_sweep(
             For CNN models, a list/tuple of (height, width).
             For RNN models, an int giving ``input_size`` (number of features per
             time step, e.g. ``1`` for a univariate series).
-            For NLP models (BOW, TextCNN, SkipGram), this argument is unused;
-            pass any value or ``None``.
+            For NLP models (BOW, TextCNN, SkipGram, TextRNN, TextAttn,
+            TextTransformer), this argument is unused; pass any value or ``None``.
         num_outputs: Number of output classes.
         wandb_entity_name: Optional W&B entity (user or team) name.
         checkpoint_resume: Bool of whether checkpointing is activated.
@@ -175,6 +175,14 @@ def make_train_sweep(
         # AttentionClassifier related config hyperparameters
         num_heads = getattr(config, "num_heads", default_model_config.num_heads)
 
+        # TransformerClassifier
+        num_encoder_layers = getattr(
+            config, "num_encoder_layers", default_model_config.num_encoder_layers
+        )
+        dim_feedforward = getattr(
+            config, "dim_feedforward", default_model_config.dim_feedforward
+        )
+
         # Trainer related config hyperparameters
         trainer_batch_size = getattr(
             config, "trainer_batch_size", default_trainer_config.trainer_batch_size
@@ -232,6 +240,12 @@ def make_train_sweep(
                 f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
                 f"_ed{embedding_dim}_nh{num_heads}_wd{weight_decay:.5f}"
             )
+        elif model_type == ModelType.TEXTTRANSFORMER:
+            run.name = (
+                f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}"
+                f"_ed{embedding_dim}_nh{num_heads}_nl{num_encoder_layers}"
+                f"_dff{dim_feedforward}_wd{weight_decay:.5f}"
+            )
         else:
             hidden_str = "x".join(map(str, hidden_units))
             run.name = f"{model_type}_bs{trainer_batch_size}_lr{learning_rate:.5f}_h{hidden_str}_wd{weight_decay:.5f}_m{momentum:.2f}"
@@ -246,6 +260,7 @@ def make_train_sweep(
             ModelType.TEXTCNN,
             ModelType.TEXTRNN,
             ModelType.TEXTATTN,
+            ModelType.TEXTTRANSFORMER,
         ):
             collate_fn = partial(
                 text_collate_fn, max_seq_len=max_seq_len, padding_value=padding_idx
@@ -321,6 +336,9 @@ def make_train_sweep(
             clip_grad_norm=clip_grad_norm,
             # AttentionClassifier Support
             num_heads=num_heads,
+            # TransformerClassifier support
+            num_encoder_layers=num_encoder_layers,
+            dim_feedforward=dim_feedforward,
         )
 
         # Build model, optimizer, and criterion

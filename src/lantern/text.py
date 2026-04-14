@@ -493,3 +493,83 @@ def print_similar_words(
     print(f"Words most similar to '{target_word}':")
     for score, idx in zip(top_scores, top_indices):
         print(f"  {itos.get(idx.item(), '<UNK>'):<15} {score.item():.4f}")
+
+
+# ============================ EXPERIMENTAL ============================
+
+
+def mlm_collate_fn(
+    batch,
+    mask_id,
+    vocab_size,
+    padding_value,
+    max_seq_len,
+    mask_prob,
+):
+    """Collate function for Masked Language Modeling.
+
+    Pads sequences, then randomly masks 15% of non-padding tokens following the
+    BERT masking strategy (80% [MASK], 10% random, 10% unchanged).
+
+    Args:
+        batch: List of (token_ids_tensor, label_tensor) tuples.
+        padding_value: PAD token index.
+        max_seq_len: Maximum sequence length (truncate longer sequences).
+        mask_prob: Fraction of non-padding tokens to mask.
+        mask_id: Token ID for the <MASK> token.
+        vocab_size: Total vocabulary size (for random replacement).
+
+    Returns:
+        Tuple of (masked_input, mlm_labels) where:
+            masked_input: (batch, seq_len) — input with masked tokens
+            mlm_labels: (batch, seq_len) — original token IDs at masked positions,
+                        -100 elsewhere (ignored by CrossEntropyLoss)
+    """
+    texts, _ = zip(*batch)  # ignore original task labels — MLM is self-supervised
+
+    # Truncate sequences to max_seq_len
+    if max_seq_len is not None:
+        texts = tuple(t[:max_seq_len] for t in texts)
+
+    # Pad to uniform length within the batch
+    padded = pad_sequence(texts, batch_first=True, padding_value=padding_value)
+    # (batch, seq_len)
+
+    # ── Create masks ──
+    # Only mask non-padding positions
+    non_pad_mask = padded != padding_value  # True where there are real tokens
+
+    # Randomly select mask_prob fraction of non-padding positions
+    rand_matrix = torch.rand(padded.shape)  # uniform [0, 1)
+    mask_positions = (rand_matrix < mask_prob) & non_pad_mask  # True = will be masked
+
+    # ── Build MLM labels ──
+    # -100 at positions we don't predict; original token ID at masked positions
+    mlm_labels = torch.full(padded.shape, -100, dtype=torch.long)
+    mlm_labels[mask_positions] = padded[
+        mask_positions
+    ]  # ground truth at masked positions
+
+    # ── Apply the BERT masking strategy to the input ──
+    masked_input = padded.clone()
+
+    # Generate a random number for each masked position to decide the replacement type
+    replacement_probs = torch.rand(mask_positions.sum())
+
+    # Get indices of masked positions
+    mask_indices = mask_positions.nonzero(as_tuple=False)  # (N_masked, 2)
+
+    # 80% of masked positions → replaced with <MASK> token
+    mask_replace = replacement_probs < 0.8
+    mask_replace_idx = mask_indices[mask_replace]
+    masked_input[mask_replace_idx[:, 0], mask_replace_idx[:, 1]] = mask_id
+
+    # 10% of masked positions → replaced with a random token (avoid PAD=0)
+    random_replace = (replacement_probs >= 0.8) & (replacement_probs < 0.9)
+    random_replace_idx = mask_indices[random_replace]
+    random_tokens = torch.randint(2, vocab_size, (random_replace_idx.shape[0],))
+    masked_input[random_replace_idx[:, 0], random_replace_idx[:, 1]] = random_tokens
+
+    # 10% of masked positions → left unchanged (but still predicted via mlm_labels)
+
+    return masked_input, mlm_labels

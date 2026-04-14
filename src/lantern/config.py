@@ -147,9 +147,10 @@ class ModelType(Enum):
     TEXTRNN = "textrnn"
     SEQ2SEQ = "seq2seq"
     TEXTATTN = "textattn"
+    TEXTTRANSFORMER = "texttransformer"
 
     def __str__(self) -> str:
-        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``, ``"rnn"``, ``"textrnn"``, ``"seq2seq"``)."""
+        """Return the string value of the enum member (e.g. ``"mlp"``, ``"cnn"``, ``"bow"``, ``"textcnn"``, ``"skipgram"``, ``"rnn"``, ``"textrnn"``, ``"seq2seq"``, ``"textattn"``, ``"texttransformer"``)."""
         return self.value
 
 
@@ -161,7 +162,8 @@ class ModelConfig:
         model_type: Model architecture identifier (uses ModelType enum).
             One of ``ModelType.MLP``, ``ModelType.CNN``, ``ModelType.BOW``,
             ``ModelType.TEXTCNN``, ``ModelType.SKIPGRAM``, ``ModelType.RNN``,
-            ``ModelType.TEXTRNN``, ``ModelType.SEQ2SEQ``, or ``ModelType.TEXTATTN``.
+            ``ModelType.TEXTRNN``, ``ModelType.SEQ2SEQ``, ``ModelType.TEXTATTN``,
+            or ``ModelType.TEXTTRANSFORMER``.
         hidden_units: Number of neurons in each hidden layer (MLP only).
         dropout: Dropout rate after each hidden layer, aligned with hidden_units (MLP only).
         conv_blocks: List of ConvBlockConfig or ResidualBlockConfig instances
@@ -192,6 +194,11 @@ class ModelConfig:
             embed_dim % num_heads == 0.
         max_seq_len: If set, input sequences are truncated to at most this many
             tokens before processing. ``None`` disables truncation (NLP only).
+        num_encoder_layers: Number of stacked TransformerEncoderLayer blocks
+            (Transformer encoder only).
+        dim_feedforward: Hidden dimension of the feedforward sublayer inside
+            each TransformerEncoderLayer. Typically set to ``4 * embedding_dim``
+            (Transformer encoder only).
     """
 
     model_type: ModelType = ModelType.MLP
@@ -213,7 +220,7 @@ class ModelConfig:
 
     # NLP / Embedding Fields
     vocab_size: int = 0
-    embedding_dim: int = 100
+    embedding_dim: int = 128
     padding_idx: int = 0
     freeze_embeddings: bool = False
     # Critical for attention aheads -> O(batch * L^2)
@@ -230,6 +237,12 @@ class ModelConfig:
 
     # Attention Fields
     num_heads: int = 4
+
+    # Transformer Encoder Fields
+    num_encoder_layers: int = 2  # Number of stacked TransformerEncoderLayers
+    dim_feedforward: int = (
+        512  # Hidden dimension in the FFN sublyaer (typically 4 * embedding_dim)
+    )
 
     def __post_init__(self) -> None:
         """Convert model_type from string to ModelType enum if needed."""
