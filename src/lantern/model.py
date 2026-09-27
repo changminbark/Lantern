@@ -12,7 +12,7 @@ Author: Chang Min Bark
 
 import math
 from dataclasses import asdict
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -1125,12 +1125,13 @@ class Seq2SeqForecaster(nn.Module):
     feeding each prediction as the next input.
 
     Args:
-        input_size: Number of features per time step (1 for univariate).
+        input_size: Number of features per time step. Must be 1 (univariate).
         forecast_horizon: Number of future steps to predict.
         config: ModelConfig with model_type == ModelType.SEQ2SEQ.
 
     Raises:
-        ValueError: If config.model_type is not ModelType.SEQ2SEQ.
+        ValueError: If config.model_type is not ModelType.SEQ2SEQ, if
+            input_size is not 1, or if config.bidirectional is True.
     """
 
     def __init__(self, input_size: int, forecast_horizon: int, config: ModelConfig):
@@ -1139,6 +1140,17 @@ class Seq2SeqForecaster(nn.Module):
             raise ValueError(
                 f"Invalid model_type: {config.model_type}. Expected 'ModelType.SEQ2SEQ'."
             )
+        # Each 1-value prediction is fed back as the next decoder input,
+        # so only univariate series work.
+        if input_size != 1:
+            raise ValueError(
+                f"Seq2SeqForecaster only supports input_size=1, got {input_size}."
+            )
+        # A bidirectional decoder outputs 2 * hidden_size features, which does
+        # not match output_layer, and can't run backward over unseen future steps.
+        if config.bidirectional:
+            raise ValueError("Seq2SeqForecaster does not support bidirectional=True.")
+        self.input_size = input_size
         self.forecast_horizon = forecast_horizon
         self.hidden_size = config.rnn_hidden_size
         self.config = config
@@ -1197,6 +1209,38 @@ class Seq2SeqForecaster(nn.Module):
             decoder_input = pred.unsqueeze(1)  # (batch, 1, input_size)
 
         return torch.cat(predictions, dim=1)  # (batch, forecast_horizon)
+
+    def num_parameters(self) -> tuple[int, int]:
+        """Count total and trainable parameters in this module and submodules.
+
+        Returns:
+            A tuple ``(total_params, trainable_params)`` where both counts are
+            non-negative integers.
+        """
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+    def get_architecture_config(self) -> dict:
+        """Return a JSON-serializable description of the architecture.
+
+        Returns:
+            A dictionary with keys:
+
+            * ``model_type``: ``ModelType.SEQ2SEQ``.
+            * ``model_class``: The string ``"Seq2SeqForecaster"``.
+            * ``input_size``: Features per time step.
+            * ``forecast_horizon``: Number of future steps predicted.
+            * ``config``: The full ``ModelConfig`` as a plain dict (via
+              ``dataclasses.asdict``).
+        """
+        return {
+            "model_type": self.config.model_type,
+            "model_class": "Seq2SeqForecaster",
+            "input_size": self.input_size,
+            "forecast_horizon": self.forecast_horizon,
+            "config": asdict(self.config),
+        }
 
 
 class AttentionClassifier(nn.Module):
@@ -1324,6 +1368,15 @@ class AttentionClassifier(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return total, trainable
 
+    def get_architecture_config(self) -> dict:
+        """Return a JSON-serializable description of the architecture."""
+        return {
+            "model_type": self.config.model_type,
+            "model_class": "AttentionClassifier",
+            "num_outputs": self.num_outputs,
+            "config": asdict(self.config),
+        }
+
 
 class PositionalEncoding(nn.Module):
     """Sinusoidal positional encoding for transformer models.
@@ -1340,13 +1393,18 @@ class PositionalEncoding(nn.Module):
 
     Args:
         d_model (int): Embedding / model dimension.
-        max_len (int): Maximum sequence length to precompute encodings for.
+        max_len (Optional[int]): Maximum sequence length to precompute encodings
+            for. ``None`` (e.g. ``ModelConfig.max_seq_len`` left unset) uses 5000.
         dropout (float): Dropout probability applied after adding PE.
     """
 
-    def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.1):
+    def __init__(
+        self, d_model: int, max_len: Optional[int] = 5000, dropout: float = 0.1
+    ):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
+        if max_len is None:
+            max_len = 5000
 
         # ── Precompute the sinusoidal PE matrix ──
         pe = torch.zeros(max_len, d_model)  # (max_len, d_model)
@@ -1373,7 +1431,16 @@ class PositionalEncoding(nn.Module):
 
         Returns:
             Tensor of same shape with positional encoding added and dropout applied.
+
+        Raises:
+            ValueError: If seq_len is longer than the precomputed max_len.
         """
+        if x.size(1) > self.pe.size(1):
+            raise ValueError(
+                f"Sequence length {x.size(1)} exceeds PositionalEncoding max_len "
+                f"{self.pe.size(1)}. Truncate inputs (e.g. text_collate_fn's "
+                f"max_seq_len) or raise ModelConfig.max_seq_len."
+            )
         x = x + self.pe[:, : x.size(1), :]  # slice PE to match actual seq_len
         return self.dropout(x)
 

@@ -148,6 +148,11 @@ class Trainer:
             else:
                 loss = self.criterion(outputs, targets)
             loss.backward()
+            # clip_grad_norm lives on ModelConfig; 0 disables clipping
+            model_config = getattr(self.model, "config", None)
+            max_norm = getattr(model_config, "clip_grad_norm", 0.0)
+            if max_norm > 0:
+                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
             self.optimizer.step()
 
             batch_size = inputs.size(0)

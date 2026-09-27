@@ -113,10 +113,7 @@ def build_model(
                 "SEQ2SEQ requires input_spec as int > 0 (input_size = features per time step)."
             )
         return Seq2SeqForecaster(
-            input_size=input_spec,
-            hidden_size=config.rnn_hidden_size,
-            num_layers=config.rnn_num_layers,
-            forecast_horizon=num_outputs,
+            input_size=input_spec, forecast_horizon=num_outputs, config=config
         )
     elif config.model_type == ModelType.TEXTATTN:
         return AttentionClassifier(num_outputs=num_outputs, config=config)
@@ -173,8 +170,13 @@ def load_model_from_checkpoint(
     Only model architecture and weights are restored — optimizer state and other
     training metadata are not loaded.
 
+    The model type is read from ``model_type`` if present, otherwise inferred
+    from ``model_class``.
+
     Supported model types: ``ModelType.MLP``, ``ModelType.CNN``, ``ModelType.BOW``,
-    ``ModelType.TEXTCNN``, ``ModelType.RNN``. ``ModelType.SKIPGRAM`` is not supported.
+    ``ModelType.TEXTCNN``, ``ModelType.RNN``, ``ModelType.TEXTRNN``,
+    ``ModelType.SEQ2SEQ``, ``ModelType.TEXTATTN``, ``ModelType.TEXTTRANSFORMER``.
+    ``ModelType.SKIPGRAM`` is not supported.
 
     Args:
         checkpoint_path: Path to the ``.pt`` checkpoint file.
@@ -185,8 +187,7 @@ def load_model_from_checkpoint(
 
     Raises:
         FileNotFoundError: If the checkpoint file does not exist.
-        KeyError: If the checkpoint is missing ``model_architecture`` metadata or
-            ``model_architecture`` is missing a ``model_type`` key.
+        KeyError: If the checkpoint is missing ``model_architecture`` metadata.
         ValueError: If the model type cannot be determined from the checkpoint, or
             if it is ``ModelType.SKIPGRAM`` (unsupported).
     """
@@ -196,14 +197,13 @@ def load_model_from_checkpoint(
         )
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    if "model_architecture" not in checkpoint:
+    # Trainer saves None here for models without get_architecture_config
+    architecture = checkpoint.get("model_architecture")
+    if not architecture:
         raise KeyError(
             "Checkpoint dictionary does not have model_architecture metadata"
         )
-    architecture = checkpoint["model_architecture"]
 
-    if "model_type" not in architecture:
-        raise KeyError("model_architecture metadata does not have model_type")
     model_type = architecture.get("model_type")
 
     if model_type is None:
@@ -215,8 +215,18 @@ def load_model_from_checkpoint(
             "TextCNN1D": ModelType.TEXTCNN,
             "RNNModel": ModelType.RNN,
             "TextRNNModel": ModelType.TEXTRNN,
+            "Seq2SeqForecaster": ModelType.SEQ2SEQ,
+            "AttentionClassifier": ModelType.TEXTATTN,
+            "TransformerClassifier": ModelType.TEXTTRANSFORMER,
         }
         model_type = dict_class_to_type.get(model_class)
+
+    # Some models store model_type as a plain string (e.g. "textcnn")
+    if isinstance(model_type, str):
+        try:
+            model_type = ModelType(model_type)
+        except ValueError:
+            model_type = None
 
     if model_type is None:
         raise ValueError(
@@ -260,14 +270,20 @@ def load_model_from_checkpoint(
             num_outputs=architecture["num_outputs"],
             config=config,
         )
+    elif model_type == ModelType.SEQ2SEQ:
+        model = Seq2SeqForecaster(
+            input_size=architecture["input_size"],
+            forecast_horizon=architecture["forecast_horizon"],
+            config=config,
+        )
     elif model_type == ModelType.TEXTATTN:
         model = AttentionClassifier(
-            num_outputs=architecture["num_ouputs"],
+            num_outputs=architecture["num_outputs"],
             config=config,
         )
     elif model_type == ModelType.TEXTTRANSFORMER:
         model = TransformerClassifier(
-            num_outputs=architecture["num_ouputs"],
+            num_outputs=architecture["num_outputs"],
             config=config,
         )
     else:
