@@ -1,17 +1,19 @@
 # Lantern 🏮
-A custom PyTorch neural network engine and course notebooks for CSCI 357 - AI and Neural Networks.
+A custom PyTorch neural network engine and a robot learning module extension.
 
 ## Description
-This repo has two main components:
+This repo has three main components:
 
 - **`src/lantern`** — A custom PyTorch neural network engine that provides reusable building blocks for training and evaluating models. Includes support for configurable model architectures (MLP, CNN, NLP), training loops, optimizers, learning rate schedulers, checkpointing, early stopping, metrics, and W&B sweep utilities.
 
+- **`experiments`** - Scripts and Jupyter notebooks for running experiments related to deep learning and robot learning. These are less structured compared to the other directories.
+
 - **`notebooks/`** — Jupyter notebooks containing class notes, labs, and homework assignments for CSCI 357.
 
-It supports Weights and Biases (`wandb`) logging for both regular  training and sweep training.
+It supports Weights and Biases (`wandb`) logging for both regular training and sweep training.
 
 ## Installation
-Using VSCode with Google Colab extension (no Python environment/package management required)
+Using VSCode with Google Colab extension (no Python environment/package management required) OR use a local virtual environment using `uv venv` + `uv sync --all-extras`.
 
 ## Class Information
 Name(s): Chang Min<br>
